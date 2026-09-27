@@ -233,7 +233,7 @@ test("reload elsewhere replaces Refresh with a new-conversation message and clea
   const link = dialog.querySelector("a");
   link.emit("click", { preventDefault() {} }); await drain();
   assert.equal(card.state.links.length, 1);
-  assert.match(card.state.links[0].href, /plugin_asdk_app_test:~:text=Information-,Refresh,-Connected$/);
+  assert.equal(card.state.links[0].href, "https://chatgpt.com/#settings/Plugins/plugin_asdk_app_test");
   assert.equal(card.hasButton("Refresh"), true);
   assert.match(card.text(), /Settings → Plugins/);
   card.state.live = payload("conversation_stale"); await card.tick();

@@ -2581,8 +2581,8 @@ is anonymous; configure a separate tunnel for independently tracked installation
 
 Refresh opens a dimmed, keyboard-accessible popover explaining **Settings →
 Plugins → Codexify connector → scroll to the bottom → Information → Refresh**.
-It includes a direct connector-settings link with the existing text fragment
+It includes a direct connector-settings link without a text fragment
 when the widget host exposes the connector slug, otherwise a Plugins-settings
 link. Opening that link is not treated as proof of refresh. ChatGPT controls
-these settings URLs and text-fragment scrolling, so manual instructions remain
-available when navigation is unsupported.
+these settings URLs, so manual instructions remain available when navigation
+is unsupported.

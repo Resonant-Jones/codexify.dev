@@ -1247,14 +1247,13 @@ before opening settings, and a later recorded reload removes obsolete Refresh
 feedback as well as the button. The settings-link helper walks upward through
 same-origin iframe ancestors until the first
 cross-origin boundary and accepts a connector slug only from a hostname matching
-`asdk_app_<slug>.web-sandbox.oaiusercontent.com`. It builds the relative
-`#settings/Plugins/plugin_asdk_app_<slug>:~:text=Information-,Refresh,-Connected`
-hash from that sandbox identity and passes it directly to ChatGPT's
-`window.openai.openExternal`, whose relative navigation preserves the current page
+`asdk_app_<slug>.web-sandbox.oaiusercontent.com`. From that sandbox identity it
+builds `https://chatgpt.com/#settings/Plugins/plugin_asdk_app_<slug>` without a
+text fragment and passes it directly to ChatGPT's `window.openai.openExternal`,
 without requiring `document.referrer`. The portable `ui/open-link` request remains
 the compatibility fallback. When the sandbox identity is unavailable, the widget
-uses the generic `#settings/Plugins` route. It then tells the user to select
-Codexify if necessary, scroll below the connector's tool list, and click
+uses the generic `https://chatgpt.com/#settings/Plugins` route. It then tells the
+user to select Codexify if necessary, scroll below the connector's tool list, and click
 **Refresh**. Refresh never creates an agent turn.
 
 ### 8.5 Detached self-update

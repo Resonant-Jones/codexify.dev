@@ -105,9 +105,10 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
       assert.equal(links.length, 0);
       assert.match(await dialog.innerText(), /Settings.*Plugins.*Codexify connector/);
       const link = dialog.getByRole("link", { name:"Open connector settings", exact:true });
-      assert.match(await link.getAttribute("href"), /plugin_asdk_app_test:~:text=Information-,Refresh,-Connected$/);
+      assert.equal(await link.getAttribute("href"), "https://chatgpt.com/#settings/Plugins/plugin_asdk_app_test");
       await link.click();
       assert.equal(links.length, 1);
+      assert.equal(links[0], "https://chatgpt.com/#settings/Plugins/plugin_asdk_app_test");
       assert(!calls.some(call => /reload|refresh/.test(call.name)));
       await dialog.press("Escape");
       await dialog.waitFor({ state:"hidden" });

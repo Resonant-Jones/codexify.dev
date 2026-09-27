@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The setup widget's **Refresh** dialog links to connector settings without a
+  text-fragment suffix. The connector-specific destination and manual refresh
+  instructions are unchanged.
+
 ## [1.6.6] - 2026-09-27
 
 ### Changed

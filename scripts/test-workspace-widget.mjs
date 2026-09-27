@@ -144,9 +144,10 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
       assert.match(await dialog.innerText(), /Settings.*Plugins/);
       assert.match(await dialog.innerText(), /Information/);
       const link = dialog.getByRole("link", { name:"Open connector settings", exact:true });
-      assert.match(await link.getAttribute("href"), /^https:\/\/chatgpt.com\/#settings\/Plugins\/plugin_asdk_app_test:~:text=Information-,Refresh,-Connected$/);
+      assert.equal(await link.getAttribute("href"), "https://chatgpt.com/#settings/Plugins/plugin_asdk_app_test");
       await link.click();
       assert.equal(f.links.length, 1);
+      assert.equal(f.links[0], "https://chatgpt.com/#settings/Plugins/plugin_asdk_app_test");
       assert.equal(f.state.connectorSchema.status, "stale");
       if (process.env.CODEXIFY_WORKSPACE_SCREENSHOTS) {
         mkdirSync(process.env.CODEXIFY_WORKSPACE_SCREENSHOTS, { recursive:true });
