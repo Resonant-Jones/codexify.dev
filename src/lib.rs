@@ -21,6 +21,7 @@ pub mod config_cli;
 pub(crate) mod config_migration;
 mod connector_schema;
 pub mod conversation_auth;
+mod conversation_continuations;
 pub mod diff;
 pub mod diff_ui;
 pub mod doctor;

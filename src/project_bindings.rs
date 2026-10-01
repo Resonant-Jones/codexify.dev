@@ -72,6 +72,13 @@ impl ConversationIdentity {
         })
     }
 
+    pub(crate) fn from_stable_keys(key: String, legacy_key: String) -> Option<Self> {
+        if !valid_identity_key(&key) || !valid_identity_key(&legacy_key) {
+            return None;
+        }
+        Some(Self { key, legacy_key })
+    }
+
     pub(crate) fn stable_key(&self) -> &str {
         &self.key
     }
@@ -83,6 +90,13 @@ impl ConversationIdentity {
     pub fn audit_hash(&self) -> &str {
         &self.key[..24]
     }
+}
+
+fn valid_identity_key(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
