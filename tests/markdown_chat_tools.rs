@@ -22,8 +22,11 @@ fn fixture() -> (
     config.memory.dir = Some(root.path().join("metadata").display().to_string());
     config.markdown_chat.enabled = true;
     config.markdown_chat.max_wait_ms = 1000;
+    let conversation = ConversationIdentity::from_openai_session("tool-test");
     let context = ToolRequestContext {
-        conversation: ConversationIdentity::from_openai_session("tool-test"),
+        conversation: conversation.clone(),
+        task_conversation: conversation,
+        conversation_retired: false,
         connector_schema_version: None,
         conversation_schema_version: None,
         conversation_authorizations: Arc::new(
@@ -465,8 +468,11 @@ async fn widget_send_is_idempotent_and_history_never_consumes_or_marks_delivery(
         chat.read(false).await.unwrap().text,
         format!("{markdown}\n\n")
     );
+    let other_conversation = ConversationIdentity::from_openai_session("other-widget");
     let other = ToolRequestContext {
-        conversation: ConversationIdentity::from_openai_session("other-widget"),
+        conversation: other_conversation.clone(),
+        task_conversation: other_conversation,
+        conversation_retired: false,
         ..context.clone()
     };
     let page = reader

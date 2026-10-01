@@ -4,7 +4,7 @@
 
 **Goal:** Replace workspace-only continuation prompts with a one-time handoff that moves one Codexify task to a replacement ChatGPT conversation while preserving Codexify-owned state and retiring the old owner.
 
-**Architecture:** Add a private persistent continuation store that maps physical ChatGPT conversations to a stable task identity and issues one-time token capabilities. Resolve project/chat/diff/exec state through the task identity while retaining physical identity for authorization, connector schemas, audit, and agent tickets. The setup widget creates the token only when the user copies the prompt; the destination claims it through `set_project_root`.
+**Architecture:** Add a private persistent continuation store that maps physical ChatGPT conversations to a stable task identity and issues one-time token capabilities. Resolve project/chat/diff/exec state through the task identity while retaining physical identity for authorization, connector schemas, audit, and agent tickets. The setup widget creates the token only when the user copies the prompt; the destination claims it through `continue_task` before workspace selection.
 
 **Tech Stack:** Rust 2024, Tokio, serde/serde_json, SHA-256, getrandom, base64 URL-safe tokens, MCP Apps HTML/JavaScript, Node and Playwright tests.
 
@@ -153,7 +153,7 @@ Change `ToolRequestContext` to carry both:
 ```rust
 pub conversation: Option<ConversationIdentity>,
 pub task_conversation: Option<ConversationIdentity>,
-pub continuations: Arc<ConversationContinuationStore>,
+pub conversation_retired: bool,
 ```
 
 Keep `conversation` as the physical request identity. Update stateful tools to use `task_conversation`; keep setup authorization and connector-schema handling on `conversation`.
@@ -170,7 +170,7 @@ In `CodexHandler::call_tool`:
 - keep agent tickets, authorization, schema tracking, and audit attribution physical;
 - use task identity for project binding, chat activity/delivery, exec sessions, diff ownership, workspace-change state, and selected-root lookup.
 
-Re-resolve task ownership after `set_project_root` so the successful claim call finishes against the transferred task state.
+Re-resolve task ownership after `continue_task` so the successful claim call finishes against the transferred task state.
 
 - [ ] **Step 5: Run dispatch tests**
 
@@ -193,7 +193,7 @@ git commit -m "feat: route task state through handoff ownership"
 ### Task 3: Create and claim continuation tokens through tools
 
 **Files:**
-- Create: `src/tools/prepare_continuation.rs`
+- Create: `src/tools/continuation.rs`
 - Modify: `src/tools/mod.rs`
 - Modify: `src/registry.rs`
 - Modify: `src/tools/set_project_root.rs`
@@ -207,7 +207,7 @@ Cover:
 
 ```rust
 #[test]
-fn set_project_root_accepts_only_continuation_token_for_a_handoff() { /* schema and parser */ }
+fn continue_task_accepts_only_a_write_only_continuation_token() { /* schema and parser */ }
 
 #[tokio::test]
 async fn continuation_claim_reuses_the_exact_existing_workspace() { /* ... */ }
@@ -225,7 +225,7 @@ Run:
 
 ```sh
 cargo test continuation_claim
-cargo test set_project_root_accepts_only_continuation_token
+cargo test continue_task_accepts_only_a_write_only_continuation_token
 ```
 
 Expected: failures because the tool argument and private token tool do not exist.
@@ -245,11 +245,17 @@ Create `setup_ui_prepare_continuation` as an app-only non-read-only tool. It req
 
 Its model-visible text is only `Continuation prompt ready.`
 
-- [ ] **Step 4: Extend `set_project_root`**
+- [ ] **Step 4: Add `continue_task`**
 
-Add `continuationToken` as a fourth mutually exclusive selection mode. Keep `resumePath` for workspace-only compatibility. On claim, validate that the destination has no selected workspace, verify the token's source workspace through the source task binding, commit the owner change, and return the existing workspace selection with continuation-specific text.
+Add a dedicated model-facing `continue_task({continuationToken})` tool. Keep
+`resumePath` on `set_project_root` for workspace-only compatibility. On claim,
+validate that the destination has no selected workspace or other task, verify the
+token's source workspace through the source task binding, commit the owner change,
+and return the existing workspace with continuation-specific text. Repeating the
+exact successful token from the new owner is idempotent; a different token is not.
 
-Update `RESUME_GUIDANCE` and schema descriptions to distinguish full task continuation from `resumePath`.
+Update `RESUME_GUIDANCE` and schema descriptions to distinguish `continue_task`
+full task continuation from `resumePath`.
 
 - [ ] **Step 5: Run focused tests**
 
@@ -266,7 +272,7 @@ Expected: all focused tests pass.
 - [ ] **Step 6: Commit**
 
 ```sh
-git add src/tools/prepare_continuation.rs src/tools/mod.rs src/registry.rs src/tools/set_project_root.rs src/server.rs src/server_continuation_tests.rs tests/workspace_resume.rs
+git add src/tools/continuation.rs src/tools/mod.rs src/registry.rs src/tools/set_project_root.rs src/server.rs src/server_continuation_tests.rs tests/workspace_resume.rs
 git commit -m "feat: claim task handoffs with one-time tokens"
 ```
 

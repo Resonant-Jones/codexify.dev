@@ -23,7 +23,7 @@ fn active_workspace(
     if !config.multi_project {
         return Ok(Some(config.work_dir.clone()));
     }
-    match context.conversation.as_ref() {
+    match context.task_conversation.as_ref() {
         Some(identity) => context
             .project_bindings
             .selected_project_root(config, identity),
@@ -146,9 +146,9 @@ impl Tool for ChatTool {
 
     fn description(&self) -> String {
         match self {
-            Self::Read => "NON-TERMINAL TOOL. Read and acknowledge all new user text in this conversation's CHAT.md, without truncation. Prefer this over direct file reads. After handling all newly read messages, continue useful work if any remains; otherwise you MUST call chat_await and MUST NOT end the assistant turn. Whenever the user posts a new message, prioritize answering or acknowledging it with chat_write.",
-            Self::Write => "NON-TERMINAL TOOL. Append a Markdown message to this conversation's CHAT.md and optionally notify the user through configured notification services. This is the only supported way for the agent to write this file. You MUST NOT end the assistant turn after a successful chat_write. If new_chat_message_from_user is returned, answer or acknowledge it with chat_write before other work. Otherwise continue useful work if any remains; if not, your next action MUST be chat_await. A completion report is still non-terminal.",
-            Self::Await => "This is the only valid idle state while Markdown chat is active. Never substitute a normal assistant final response for chat_await. Wait for new user text in this conversation's CHAT.md, then return and acknowledge it in full without truncation. The server config controls the wait deadline; no tool argument can change it. If a user message is returned, answer or acknowledge it with chat_write. After a timeout or cancellation without a user message, call chat_await again unless the user explicitly authorized ending this turn or a higher-priority instruction requires it.",
+            Self::Read => "NON-TERMINAL TOOL. Read and acknowledge all new user text in this Codexify task's CHAT.md, without truncation. Prefer this over direct file reads. After handling all newly read messages, continue useful work if any remains; otherwise you MUST call chat_await and MUST NOT end the assistant turn. Whenever the user posts a new message, prioritize answering or acknowledging it with chat_write.",
+            Self::Write => "NON-TERMINAL TOOL. Append a Markdown message to this Codexify task's CHAT.md and optionally notify the user through configured notification services. This is the only supported way for the agent to write this file. You MUST NOT end the assistant turn after a successful chat_write. If new_chat_message_from_user is returned, answer or acknowledge it with chat_write before other work. Otherwise continue useful work if any remains; if not, your next action MUST be chat_await. A completion report is still non-terminal.",
+            Self::Await => "This is the only valid idle state while Markdown chat is active. Never substitute a normal assistant final response for chat_await. Wait for new user text in this Codexify task's CHAT.md, then return and acknowledge it in full without truncation. The server config controls the wait deadline; no tool argument can change it. If a user message is returned, answer or acknowledge it with chat_write. After a timeout or cancellation without a user message, call chat_await again unless the user explicitly authorized ending this turn or a higher-priority instruction requires it.",
         }.into()
     }
 
@@ -238,7 +238,7 @@ impl Tool for ChatTool {
                     }
                 };
             };
-            let pending = match &context.conversation {
+            let pending = match &context.task_conversation {
                 Some(identity) => context
                     .project_bindings
                     .pending_workspace_change(config, identity),
@@ -258,13 +258,14 @@ impl Tool for ChatTool {
         } else {
             config
         };
-        let chat = match context
-            .markdown_chat
-            .chat(config, context.conversation.as_ref(), session)
-        {
-            Ok(chat) => chat,
-            Err(error) => return ToolResult::error(error),
-        };
+        let chat =
+            match context
+                .markdown_chat
+                .chat(config, context.task_conversation.as_ref(), session)
+            {
+                Ok(chat) => chat,
+                Err(error) => return ToolResult::error(error),
+            };
         if context.cancellation.is_cancelled() {
             let next_action = if matches!(self, Self::Await) {
                 NEXT_CHAT_AWAIT

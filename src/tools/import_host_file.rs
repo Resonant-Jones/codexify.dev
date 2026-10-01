@@ -303,6 +303,8 @@ mod tests {
         cancellation.cancel();
         let context = ToolRequestContext {
             conversation: None,
+            task_conversation: None,
+            conversation_retired: false,
             connector_schema_version: None,
             conversation_schema_version: None,
             markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),

@@ -45,7 +45,8 @@ function setupPayload(selected = true) {
     serverVersion:"1.4.0", worktreeMode:"never",
     project:selected ? { status:"selected", name:"codexify", activePath:"/worktrees/codexify", sourcePath:"/projects/codexify", managedWorktree:true } : { status:"unselected", selectionAvailable:true },
     update:{ status:"up_to_date", currentVersion:"1.4.0", latestVersion:"1.4.0" },
-    connectorSchema:{ status:"current", advertisedVersion:"1.4.0+markdown-chat-v2", observedVersion:"1.4.0+markdown-chat-v2", connectorVersion:"1.4.0+markdown-chat-v2", refreshRecommended:false }
+    connectorSchema:{ status:"current", advertisedVersion:"1.4.0+markdown-chat-v2", observedVersion:"1.4.0+markdown-chat-v2", connectorVersion:"1.4.0+markdown-chat-v2", refreshRecommended:false },
+    continuation:{ retired:false }
   };
 }
 
@@ -68,6 +69,7 @@ class ChatBackend {
   setup = setupPayload();
   chatEnabled = true;
   downloadsSupported = true;
+  retired = false;
   add(role, markdown, id = `fixture-${this.messages.length}`) {
     const start = this.end;
     this.end += markdown.length + 150;
@@ -106,7 +108,7 @@ class ChatBackend {
       _meta:{ [META]:{
         chat_file:"/private/project/chats/conversation/CHAT.md", revision,
         delivered_through:this.delivered, read_through:this.read,
-        last_agent_call_at_ms:this.lastAgentCall, agent_waiting_until_ms:this.agentWaitingUntil, total_tool_calls:this.totalToolCalls, server_time_ms:this.serverTime ?? Date.now(), messages,
+        last_agent_call_at_ms:this.lastAgentCall, agent_waiting_until_ms:this.agentWaitingUntil, total_tool_calls:this.totalToolCalls, server_time_ms:this.serverTime ?? Date.now(), retired:this.retired, messages,
         has_more:all.length > messages.length && !unchanged,
         before:messages[0]?.start ?? null, unchanged
       } }
@@ -692,6 +694,20 @@ for (const [engineName, engine] of [["Chromium", chromium], ["WebKit", webkit]])
         assert.equal(await alert.evaluate(node => node.className), "warning-banner");
         assert.equal(await frame.locator(".message.agent").count(), 1);
         assert.equal(await alert.evaluate(node => getComputedStyle(node).backgroundColor), "rgb(255, 243, 196)");
+        assert.deepEqual(errors, []);
+        await page.close();
+      });
+      await t.test("retired conversations keep history visible but disable the composer", async () => {
+        const backend = new ChatBackend();
+        backend.retired = true;
+        backend.add("user", "Continue this task elsewhere.");
+        backend.add("agent", "The handoff is ready.");
+        const { page, frames:[frame], errors } = await mount(browser, backend);
+        await frame.getByText("The handoff is ready.", { exact:true }).waitFor();
+        await frame.getByText(/continued in another ChatGPT conversation.*read-only/i).waitFor();
+        assert.equal(await frame.getByRole("textbox", { name:"Message the agent" }).isDisabled(), true);
+        assert.equal(await frame.getByRole("button", { name:"Send message", exact:true }).isDisabled(), true);
+        assert.equal(backend.calls.some(call => call.name === "chat_ui_send"), false);
         assert.deepEqual(errors, []);
         await page.close();
       });

@@ -701,7 +701,7 @@ impl ProjectBindingStore {
             ResolvedBindingState::Project(binding) => WorkspaceSelection::Project(selection_from_binding(
                 access_root, binding, config.worktrees.mode, newly_selected, false,
                 ProjectBindingScope::ChatGptConversation,
-                vec!["Resumed the existing workspace without creating a worktree. Avoid concurrent edits from the previous conversation; messages and running command sessions are not transferred.".into()],
+                vec!["Resumed only the existing workspace without creating a worktree. This compatibility path does not transfer agent-chat identity, diff state, or running command sessions; full Codexify handoff prompts use continue_task instead.".into()],
             )),
             ResolvedBindingState::WithoutProject(scratch_root) => WorkspaceSelection::WithoutProject(WithoutProjectSelection {
                 access_root, scratch_root, newly_selected, scope: ProjectBindingScope::ChatGptConversation,

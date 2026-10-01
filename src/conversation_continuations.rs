@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::project_bindings::ConversationIdentity;
+use crate::types::AppConfig;
 
 const STATE_VERSION: u32 = 1;
 const MAX_STATE_BYTES: u64 = 1024 * 1024;
@@ -57,6 +58,10 @@ struct StoredTask {
     legacy_key: String,
     owner: String,
     generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_claim_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,13 +106,14 @@ pub(crate) struct ConversationContinuationStore {
 }
 
 impl ConversationContinuationStore {
-    pub(crate) fn for_current_user() -> Result<Self, String> {
+    pub(crate) fn for_current_user(config: &AppConfig) -> Result<Self, String> {
         let home =
             crate::util::home_dir().ok_or("Conversation handoffs require a home directory")?;
+        let scope = Sha256::digest(format!("{}\0{}", config.work_dir.display(), config.port));
         Self::new(
             home.join(".codexify")
                 .join("conversation-continuations")
-                .join("state.json"),
+                .join(format!("{scope:x}.json")),
         )
     }
 
@@ -190,11 +196,14 @@ impl ConversationContinuationStore {
                 legacy_key: task.legacy_stable_key().to_string(),
                 owner: physical.stable_key().to_string(),
                 generation: 0,
+                workspace: None,
+                last_claim_digest: None,
             });
         if record.owner != physical.stable_key() || record.legacy_key != task.legacy_stable_key() {
             return Err("The current conversation does not own this Codexify task".into());
         }
         let generation = record.generation;
+        record.workspace = Some(workspace.to_string_lossy().into_owned());
         next.aliases.insert(
             physical.stable_key().to_string(),
             task.stable_key().to_string(),
@@ -289,6 +298,8 @@ impl ConversationContinuationStore {
             .generation
             .checked_add(1)
             .ok_or("Conversation handoff generation overflow")?;
+        next_task.workspace = Some(token_record.workspace.clone());
+        next_task.last_claim_digest = Some(digest);
         next.aliases.insert(
             physical.stable_key().to_string(),
             task.stable_key().to_string(),
@@ -299,6 +310,38 @@ impl ConversationContinuationStore {
         persist_state(&self.path, &next)?;
         runtime.stored = next;
         Ok(ClaimedContinuation { task, workspace })
+    }
+
+    pub(crate) fn repeated_claim(
+        &self,
+        physical: &ConversationIdentity,
+        token: &str,
+    ) -> Result<Option<ClaimedContinuation>, String> {
+        validate_token(token)?;
+        let digest = token_digest(token);
+        let runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| "Conversation handoff state is unavailable")?;
+        let task = match resolve_stored(&runtime.stored, physical)? {
+            ConversationOwnership::Active { task } => task,
+            ConversationOwnership::Retired { .. } => return Err(RETIRED_MESSAGE.into()),
+        };
+        let Some(record) = runtime.stored.tasks.get(task.stable_key()) else {
+            return Ok(None);
+        };
+        if record.owner != physical.stable_key()
+            || record.last_claim_digest.as_deref() != Some(digest.as_str())
+        {
+            return Ok(None);
+        }
+        let workspace = record
+            .workspace
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| "Conversation handoff state contains no valid workspace".to_string())?;
+        Ok(Some(ClaimedContinuation { task, workspace }))
     }
 }
 
@@ -377,6 +420,18 @@ fn validate_state(state: &StoredState) -> Result<(), String> {
     for (task_key, task) in &state.tasks {
         if !valid_key(task_key) || !valid_key(&task.legacy_key) || !valid_key(&task.owner) {
             return Err("Conversation handoff state contains an invalid identity".into());
+        }
+        if task
+            .workspace
+            .as_deref()
+            .is_some_and(|workspace| !Path::new(workspace).is_absolute())
+            || task
+                .last_claim_digest
+                .as_deref()
+                .is_some_and(|digest| !valid_key(digest))
+            || (task.last_claim_digest.is_some() && task.workspace.is_none())
+        {
+            return Err("Conversation handoff state contains invalid claim metadata".into());
         }
     }
     for (physical, task) in &state.aliases {
@@ -625,6 +680,33 @@ mod tests {
         let after_restart = ConversationContinuationStore::new(path).unwrap();
         assert_retired(&after_restart, &source, &source);
         assert_active(&after_restart, &destination, &source);
+    }
+
+    #[test]
+    fn completed_claim_can_be_retried_by_the_new_owner_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("continuations.json");
+        let workspace = root.path().join("workspace");
+        let source = identity("source");
+        let destination = identity("destination");
+        let store = ConversationContinuationStore::new(path.clone()).unwrap();
+        let token = store.issue_token(&source, &source, &workspace).unwrap();
+        store.claim(&destination, &token, |_, _| Ok(())).unwrap();
+
+        let restarted = ConversationContinuationStore::new(path).unwrap();
+        let repeated = restarted
+            .repeated_claim(&destination, &token)
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeated.task.stable_key(), source.stable_key());
+        assert_eq!(repeated.workspace, workspace);
+        let unrelated = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32]);
+        assert!(
+            restarted
+                .repeated_claim(&destination, &unrelated)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub enum ProjectSelectionRequest {
 
 impl SetProjectRoot {
     pub const NAME: &'static str = "set_project_root";
-    pub const RESUME_GUIDANCE: &'static str = "A continuation prompt with an exact active workspace path takes precedence over ordinary project selection: call `set_project_root` with only `resumePath` before selecting anything else. This reuses a validated saved worktree, direct checkout, or persistent scratch workspace without creating a worktree or cloning. Do not substitute `path`, the source checkout, a repository URL, or a conversation ID. Stop on a resume error rather than allocating a replacement. Then call `get_agent_brief` and `recall` for saved task context; conversation messages and running command sessions are not transferred.";
+    pub const RESUME_GUIDANCE: &'static str = "A full Codexify task handoff uses `continue_task` with the prompt's one-time `continuationToken` before any workspace selection. Use `set_project_root` with only `resumePath` only for an older or explicitly workspace-only continuation; it reuses a validated saved worktree, direct checkout, or persistent scratch workspace without carrying agent chat, diff, or command-session identity. Do not substitute `path`, the source checkout, a repository URL, or a conversation ID. Stop on an error rather than allocating a replacement, then call `get_agent_brief` and `recall`.";
 }
 
 fn parse_request(args: &Value) -> Result<ProjectSelectionRequest, String> {
@@ -316,7 +316,7 @@ impl Tool for SetProjectRoot {
                 "resumePath": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Resume a saved workspace in a new ChatGPT conversation using its exact absolute active path, including a managed worktree or persistent scratch workspace. Reuses that workspace unchanged; never creates or clones a checkout. Use this instead of path for a continuation prompt, before making any other workspace selection. Requires stable conversation metadata."
+                    "description": "Reuse only a saved workspace in a new ChatGPT conversation using its exact absolute active path, including a managed worktree or persistent scratch workspace. This does not transfer the Codexify task's agent chat, diff identity, or resident command sessions; full handoff prompts use continue_task instead. Never creates or clones a checkout. Requires stable conversation metadata."
                 },
                 "createWorktree": {
                     "type": "boolean",

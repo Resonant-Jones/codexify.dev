@@ -118,7 +118,14 @@ struct SetupOutput {
     project: SetupProjectInfo,
     update: UpdateCheckOutput,
     connector_schema: ConnectorSchemaInfo,
+    continuation: SetupContinuationInfo,
     debug: Option<SetupDebugInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupContinuationInfo {
+    retired: bool,
 }
 
 fn path_name(path: &std::path::Path) -> String {
@@ -182,7 +189,7 @@ fn project_info(
         return static_project_info(config);
     }
 
-    let state = match context.conversation.as_ref() {
+    let state = match context.task_conversation.as_ref() {
         Some(identity) => context.project_bindings.binding_state(config, identity),
         None => session.binding_state(config),
     };
@@ -269,6 +276,7 @@ struct SetupResultInput<'a> {
     reloaded_connector_version: Option<&'a str>,
     update_result: Result<LatestVersionInspection, String>,
     update_check_ms: u64,
+    retired: bool,
 }
 
 fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
@@ -281,6 +289,7 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
         reloaded_connector_version,
         update_result,
         update_check_ms,
+        retired,
     } = input;
     let advertised_version = env!("CARGO_PKG_VERSION");
     let schema_version = crate::connector_schema::schema_version(config);
@@ -330,6 +339,7 @@ fn setup_result(input: SetupResultInput<'_>) -> ToolResult {
         project,
         update,
         connector_schema,
+        continuation: SetupContinuationInfo { retired },
         debug: config.debug.then_some(SetupDebugInfo { update_check_ms }),
     };
     let mut result = ToolResult::text(text)
@@ -411,6 +421,14 @@ impl ConversationAuthorization {
                     ],
                     "additionalProperties": false
                 },
+                "continuation": {
+                    "type": "object",
+                    "properties": {
+                        "retired": { "type": "boolean" }
+                    },
+                    "required": ["retired"],
+                    "additionalProperties": false
+                },
                 "debug": {
                     "anyOf": [
                         {
@@ -436,6 +454,7 @@ impl ConversationAuthorization {
                 "project",
                 "update",
                 "connectorSchema",
+                "continuation",
                 "debug"
             ],
             "additionalProperties": false
@@ -495,6 +514,7 @@ impl ConversationAuthorization {
             reloaded_connector_version: context.connector_schema_version.as_deref(),
             update_result,
             update_check_ms,
+            retired: context.conversation_retired,
         })
     }
 }
@@ -608,7 +628,7 @@ impl Tool for UnrestrictedSetup {
         "Open Codexify setup".into()
     }
     fn description(&self) -> String {
-        "Call setup once to open workspace selection and this conversation's Markdown chat. No setup reference is required on this server. When the intended project is unclear or the user only says hello, leave the picker open and wait; do not select scratch by default. chat_await can wait for a selection without any workspace. After selection call get_agent_brief.".into()
+        "Call setup once to open workspace selection and this Codexify task's Markdown chat. No setup reference is required on this server. When the intended project is unclear or the user only says hello, leave the picker open and wait; do not select scratch by default. chat_await can wait for a selection without any workspace. After selection call get_agent_brief.".into()
     }
     fn describe(&self, config: &AppConfig) -> String {
         format!(
@@ -746,6 +766,7 @@ impl Tool for SetupStatus {
             reloaded_connector_version: context.connector_schema_version.as_deref(),
             update_result,
             update_check_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            retired: context.conversation_retired,
         })
     }
 }
@@ -876,6 +897,7 @@ mod tests {
                                 reloaded_connector_version: connector.map(String::as_str),
                                 update_result: Err("offline".into()),
                                 update_check_ms: 17,
+                                retired: false,
                             });
                             let data = result.structured_content.as_ref().unwrap();
                             assert_eq!(data["serverVersion"], env!("CARGO_PKG_VERSION"));
@@ -944,6 +966,7 @@ mod tests {
                 reloaded_connector_version: None,
                 update_result: Err("offline".into()),
                 update_check_ms: 0,
+                retired: false,
             });
             let data = result.structured_content.as_ref().unwrap();
             assert!(jsonschema::is_valid(
@@ -954,7 +977,7 @@ mod tests {
             assert_eq!(data["serverVersion"], env!("CARGO_PKG_VERSION"));
             assert_eq!(
                 data["connectorSchema"]["advertisedVersion"],
-                env!("CARGO_PKG_VERSION")
+                crate::connector_schema::schema_version(&config)
             );
             assert_eq!(data["connectorSchema"]["observedVersion"], Value::Null);
             assert_eq!(data["connectorSchema"]["status"], "unknown");
@@ -985,6 +1008,7 @@ mod tests {
                 source: crate::self_update::LatestVersionSource::GithubCli,
             }),
             update_check_ms: 17,
+            retired: false,
         });
 
         assert!(!result.is_error);
@@ -1029,6 +1053,7 @@ mod tests {
             reloaded_connector_version: None,
             update_result: Err("offline".to_string()),
             update_check_ms: 9,
+            retired: false,
         });
         let structured = result.structured_content.as_ref().unwrap();
         assert_eq!(structured["connectorSchema"]["status"], "unknown");
@@ -1043,7 +1068,9 @@ mod tests {
         state_root: &std::path::Path,
     ) -> ToolRequestContext {
         ToolRequestContext {
-            conversation: identity,
+            conversation: identity.clone(),
+            task_conversation: identity,
+            conversation_retired: false,
             connector_schema_version: None,
             conversation_schema_version: None,
             markdown_chat: Arc::new(crate::markdown_chat::MarkdownChatStore::default()),

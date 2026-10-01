@@ -526,8 +526,9 @@ receive an `upstream_result` envelope rather than corrupting the original schema
 Text mirrors preserve visibility in hosts that ignore structured output. Disabled
 installations retain the original advertised schemas and do not expose chat tools.
 
-Schema revisions use an explicit `+markdown-chat-v5` suffix only when enabled, not a
-schema fingerprint. Connector reloads record the version actually advertised by
+Schema revisions always include `+continuation-v1`, and add the explicit
+`+markdown-chat-v5` suffix only when chat is enabled; these are feature markers,
+not schema fingerprints. Connector reloads record the version actually advertised by
 the current configuration. A persisted conversation baseline supplies toggle
 warnings when discovery identity is absent; that baseline is not evidence of a
 connector reload. The setup widget keeps the old conversation marker while
@@ -535,7 +536,7 @@ refreshing live status, so a same-version enable/disable is not mistaken for an
 up-to-date schema. Host cancellation and model-imposed limits remain outside the
 communication subsystem's control.
 
-The optional `setup-chat/v5` resource is linked only by `setup`, combining the
+The optional `setup-chat/v6` resource is linked only by `setup`, combining the
 setup UI with one chat panel in a shadow root. The panel lives outside the setup
 controls' rerendered root; both use the setup bridge without a second handshake.
 The old standalone chat resource remains readable for existing cards, but no
@@ -548,7 +549,8 @@ channel and file lock. Optional expected workspace/transcript paths are comparis
 preconditions, not selectors: the server always resolves the destination from the
 authenticated conversation. Multi-project sends and file actions require the
 expected transcript so an older card cannot silently target a newly selected
-project. State responses include the resolved workspace path in private metadata.
+project. State responses include the resolved workspace path and the physical
+conversation's retired flag in private metadata.
 The setup controller passes the selected workspace to the mounted chat panel.
 Workspace transitions clear transcript-specific data while preserving the draft
 and per-destination pending sends. A local request generation discards late reads,
@@ -907,15 +909,16 @@ the original order and rejects duplicate names.
 | `output_budget.rs` | Line/byte windowing and list caps, each cut announced with the continuation argument. |
 | `audit.rs` | Private append-only JSONL tool lifecycle records, resolved raw MCP identities, stable hashed conversation/project identities, redacted argument summaries, output accounting, and opt-in bounded command previews using the shared redactor. |
 | `conversation_auth.rs` | Authentication-token generation and validation, constant-time comparison, copyable ChatGPT instruction rendering with the innocuous wire vocabulary, durable per-conversation authorization markers, and transport-session fallback. |
+| `conversation_continuations.rs` | Private persistent mapping from physical ChatGPT conversations to stable Codexify task identities, random one-time token issuance with digest-only storage, restart-safe idempotent claim receipts, in-flight model-call exclusion, and retired-owner enforcement. |
 | `ignore_rules.rs` | One `.gitignore`-accurate matcher (the `ignore` crate) shared by glob/grep/tree/list_directory. |
-| `project_bindings.rs` | Canonical project-root validation plus durable ChatGPT project/scratch bindings keyed by a hash of `openai/session`, namespaced by access root, locked per record, and atomically written; scratch roots are private, exact-path validated, and outside the access root. |
+| `project_bindings.rs` | Canonical project-root validation plus durable Codexify task project/scratch bindings whose initial key is derived from `openai/session`, namespaced by access root, locked per record, and atomically written; scratch roots are private, exact-path validated, and outside the access root. |
 | `project_clone.rs` | Strict provider-agnostic HTTPS/SSH Git repository URL parsing plus GitHub branch/PR/commit target parsing, conservative normalized remote matching, existing-checkout discovery, exact GitHub target-ref or object-ID fetching, bounded non-interactive cloning below `projectCloneDir`, cross-process repository locks, collision refusal, and post-clone verification. |
-| `worktrees.rs` | Per-conversation managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
+| `worktrees.rs` | Per-task managed Git worktree lifecycle: create a detached checkout under `worktrees.root` via `git worktree add`, optionally at an exact fetched commit, dual source/worktree root tracking, startup sweep bounded by `keepCount`, Windows `\\?\`-prefix handling, and the opt-in `allowSetupScript` gate for per-worktree environment setup. |
 | `project_catalog.rs` | Live, read-only project discovery from native Codex plus explicit metadata; canonical access-root filtering, deduplication, deterministic query ranking, sanitized MCP warnings, and local diagnostics. |
-| `exec_sessions.rs` | Generic-client project/scratch fallback plus conversation-owned unified-exec sessions and transport-local diff state: private persistent scratch storage with transport-local bindings, trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
-| `diff.rs` | Project-scoped Git snapshots, persistent conversation refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
+| `exec_sessions.rs` | Generic-client project/scratch fallback plus task-owned unified-exec sessions and transport-local diff state: private persistent scratch storage with transport-local bindings, trusted configured-shell resolution, Codex-compatible model shell-type selection by basename, PowerShell exit-code wrapping, background stdout/stderr drain tasks, process-group kill, idle cleanup, and output truncation (UTF-16 units to match the TS). |
+| `diff.rs` | Project-scoped Git snapshots, persistent task refs, transport-local fallbacks, incremental comparisons whose emitted snapshot can advance the private diff cursor through compare-and-swap, legacy review-ref migration, diff parsing and component-payload budgets. |
 | `diff_ui.rs` | Embedded MCP Apps resource, component-only diff-result metadata, legacy review-card compatibility, and persisted private interaction state for the interactive `show_diff` card. |
-| `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with a searchable project/scratch chooser, selected direct/worktree/scratch path rendering, cached-bypass update checks, background structured doctor diagnostics, direct connector-settings Refresh routing, conversational Autofix, and debug timing display. |
+| `setup_ui.rs` / `setup_ui.html` | Compact setup/status MCP App with a searchable project/scratch chooser, selected direct/worktree/scratch path rendering, full-task continuation token generation, retired-owner read-only state, cached-bypass update checks, background structured doctor diagnostics, direct connector-settings Refresh routing, conversational Autofix, and debug timing display. |
 | `self_update.rs` | Verified release resolution, checksum validation, bounded executable/changelog extraction, private durable updater records, and generated rollback-capable OS worker scripts. |
 | `self_update_ui.rs` | Embedded updater MCP App, component-only changelog payload, restart-tolerant polling, absolute timeout state, and app-only status-tool integration. |
 | `widget_debug.rs` | Small component-only timing metadata shared by all tool results when top-level debug mode is enabled. |
@@ -1197,31 +1200,56 @@ start a new conversation. A missing reload record remains internally `unknown`
 and hides the row. Polls never write records. Rollbacks are handled by equality,
 not by choosing the greatest semantic version.
 
-For `conversation_stale`, the setup card also renders a copyable continuation
-prompt using the current `project.activePath`. `set_project_root({resumePath})`
-is exclusive with `path`, `withoutProject`, and `createWorktree`, and is handled
-only for stable ChatGPT conversations after the ordinary authorization check.
-Under the destination conversation's binding lock, `ProjectBindingStore` finds
-an existing validated binding for that exact canonical active path within the
-configured access-root scope and persists a new binding to the same workspace.
-There is no clone/fetch/allocation path and no fallback. An already-bound
-conversation can only repeat the same active path. Managed-worktree metadata and
-source/access-root checks remain in effect; the new record also pins the worktree
-for cleanup. Persistent scratch bindings carry an optional original workspace
-namespace key so repeated handoffs reuse the same private directory without
-depending on a chain of old bindings. Legacy scratch records use their own
-conversation key. Namespace keys are validated as bounded hex path components.
+For `conversation_stale`, the setup card renders a continuation panel. **Prepare
+handoff** uses the host-message bridge to ask the current assistant to update its
+plan and `continuation-handoff` note. **Copy continuation prompt** calls the
+app-only `setup_ui_prepare_continuation` tool at copy time. The raw one-time token
+and validated current workspace are returned only in component metadata; the
+model-visible result says only that the prompt is ready. The widget verifies that
+the returned workspace still matches live setup state and puts only the token in
+the copied prompt.
 
-Project memory stays keyed by the unchanged active directory. **Prepare handoff**
-uses the existing host-message bridge to ask the current assistant to update its
-plan and `continuation-handoff` note; no server-side transcript access is assumed.
-The copyable prompt requires normal setup in the new conversation, workspace
-resumption before selection, then `get_agent_brief` and `recall`. Authorization,
-command sessions, and diff checkpoints retain the new conversation's identity.
-No raw conversation ID or setup ref is included. Clipboard denial leaves a
-selectable textarea; periodic status checks preserve the textarea while disabling
-actions during revalidation. Failed checks remove the continuation offer.
-New cards use setup resource v6; v1-v5 remain readable.
+`ConversationContinuationStore` persists task ownership under
+`~/.codexify/conversation-continuations/<server-scope>.json`. The server scope is
+a digest of the configured access root and MCP port. Each ordinary physical
+`openai/session` identity initially doubles as its stable task identity. A task
+record keeps the original stable and legacy hashes, current physical owner,
+generation, current workspace, and digest of the last completed claim. Alias
+records map every physical owner to that task. Token records contain the task,
+generation, absolute validated workspace, and SHA-256 digest of a random 32-byte
+URL-safe token. Raw session IDs and raw tokens are never stored. Private
+directories/files, bounded parsing, symlink rejection, temporary-file publication,
+and state validation make malformed or partial state fail closed.
+
+The replacement conversation completes normal setup and calls `continue_task`
+before selecting a workspace. A claim verifies the token generation, destination
+state, source workspace, and absence of an in-flight model-facing call from the
+old owner. It then changes the owner, adds the destination alias, increments the
+generation, removes outstanding task tokens, and persists before returning. Failed
+validation leaves ownership and token unchanged; concurrent claims have one
+winner. The successful destination may repeat the same token after a lost response
+or restart because the task record retains only that completed claim's digest and
+workspace. A different token cannot attach an already-owned conversation to
+another task.
+
+Dispatch retains two identities. Physical conversation identity owns setup
+authorization, connector-schema observations, audit attribution, and agent-ticket
+state. Stable task identity owns project/scratch binding, Markdown chat and its
+cursor/activity, project memory, diff checkpoints, resident exec sessions,
+workspace-change state, and worktree-use bookkeeping. Retired model calls fail
+before ticket reservation. App-only read operations may still render setup and
+chat history through the task identity; app-only mutations fail. The old setup
+card and embedded chat become read-only, while standalone owner chat continues to
+address the single task transcript.
+
+`set_project_root({resumePath})` remains a workspace-only compatibility path. It
+validates and reuses an existing direct checkout, managed worktree, or persistent
+scratch directory without cloning or allocation, but creates a separate task/chat
+identity and does not retain diff or exec-session ownership. New setup-card prompts
+use `continue_task`. Clipboard denial leaves the generated prompt selectable;
+periodic status checks preserve selection and cannot replace a live retired flag
+with a historical setup result. New cards use setup v8, setup-chat v6, and
+Markdown-chat v3; earlier resource URLs remain readable.
 
 The same compact card retains its user-driven update and diagnostic actions.
 

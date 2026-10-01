@@ -368,14 +368,14 @@ the cached older schema. This marker identifies the conversation's schema, not
 the connector's latest reload. This remains backward compatible because
 `connectorVersion` is optional in the running server's validator.
 
-The marker combines the package version with the enabled schema features:
-Markdown chat (`+markdown-chat-v5`), agent tickets (`+tickets-v1`), and
-multi-project selection (`+workspace-v1`). Tool discovery, setup descriptions,
-and initial/live setup status use the same generator with the full server
-configuration. A matching marker remains current with any combination of these
-settings. Changing a schema feature requires a connector refresh; after the
-refresh, an older conversation still needs to be replaced. Worktree policy and
-debug logging do not change this marker.
+The marker combines the package version with schema features. Task continuation
+is always present (`+continuation-v1`); Markdown chat (`+markdown-chat-v5`), agent
+tickets (`+tickets-v1`), and multi-project selection (`+workspace-v1`) are added
+when enabled. Tool discovery, setup descriptions, and initial/live setup status
+use the same generator with the full server configuration. A matching marker
+remains current with any combination of these settings. Changing a schema feature
+requires a connector refresh; after the refresh, an older conversation still
+needs to be replaced. Worktree policy and debug logging do not change this marker.
 
 The setup component places version status above workspace selection and checks for a newer release through `gh api` first, with a
 strict 2-second timeout, and falls back to the unauthenticated GitHub releases API
@@ -437,36 +437,58 @@ The continuation panel includes **Prepare handoff** and **Copy continuation
 prompt**. Prepare handoff asks the current assistant to save the task's plan and a
 `continuation-handoff` project-memory note; sending the request does not mean the
 note has been saved. When memory is unavailable, the assistant supplies a summary
-to copy alongside the prompt. The prompt contains the exact active workspace path
-and instructs the new conversation to perform its normal setup, then call:
+to copy alongside the prompt.
+
+Copy continuation prompt calls the private `setup_ui_prepare_continuation` tool
+at copy time. Codexify returns a new one-time token only in component metadata;
+the prompt contains no workspace path, setup ref, or raw conversation ID. It
+instructs the new conversation to perform normal setup, then call `continue_task`
+before selecting any workspace:
 
 ```json
-{"resumePath":"/absolute/path/to/the/existing/workspace"}
+{"continuationToken":"<opaque one-time token>"}
 ```
 
-Pass that object to `set_project_root` **before any ordinary project selection**.
-It reuses a validated, saved direct checkout, managed worktree, or persistent
-scratch workspace under the same access-root scope, regardless of worktree policy.
-It does not clone, fetch, change branches, run setup scripts, or allocate another
-worktree. Uncommitted and untracked files and the Git index remain in place.
-Missing or invalid workspaces fail without falling back to the source checkout.
-Existing bindings do not change implicitly; use **Switch to another project** before selecting a different workspace. Repeated resumes of the same workspace
-are idempotent. The new binding survives restarts and protects a reused managed
-worktree from automatic cleanup independently of the original binding.
+The claim changes which physical ChatGPT conversation owns one stable Codexify
+task. It does not copy or rename task state. The exact project or scratch binding,
+all working-tree and index changes, agent-chat transcript and cursor, delivery
+receipts, saved plan and notes, diff checkpoints, resident command sessions, and
+standalone-chat entry remain attached to the same task identity. Already
+acknowledged agent-chat messages stay acknowledged rather than being replayed as
+new input. After a successful claim, the previous ChatGPT conversation is
+read-only: model-facing calls fail before ticket reservation or dispatch, the
+setup actions are disabled, and its embedded chat keeps history visible while
+disabling the composer.
 
-Continuation reuses **the workspace**, not the old conversation's identity,
-authorization, command sessions, messages, or diff checkpoints. The new chat runs
-`get_agent_brief` and `recall` against the same workspace to recover saved context.
-Do not edit concurrently from both conversations. The textarea supports manual
+Connector authorization, connector-schema tracking, audit attribution, and the
+duplicate-agent ticket chain remain scoped to the physical ChatGPT conversation.
+The replacement therefore completes normal setup before claiming the handoff and
+starts its own ticket chain. ChatGPT does not expose its native webpage transcript
+to the connector, so reasoning that existed only in ordinary ChatGPT messages must
+be captured by Prepare handoff, files, plan, or memory. Agent-chat history itself
+is preserved.
+
+Tokens contain 32 random bytes encoded as URL-safe base64. Only their SHA-256
+digests are persisted under `~/.codexify/conversation-continuations/`; issuing a
+new token revokes the previous token for that task generation. A failed validation
+does not consume the token, concurrent claims have one winner, and retrying the
+successful `continue_task` call with the same token is safe after a lost response
+or service restart. Missing, changed, or invalid workspaces fail without selecting
+a replacement. The old owner must have no model-facing Codexify call in flight.
+
+`set_project_root({"resumePath":"/absolute/path"})` remains available as a
+workspace-only compatibility path. It reuses a validated direct checkout, managed
+worktree, or persistent scratch directory without cloning or allocating, but it
+does not transfer agent-chat identity, diff state, or resident command sessions.
+New setup-card prompts use `continue_task`. Stable ChatGPT conversation metadata
+is required; transport-only workspaces cannot use full handoff. Static connectors
+can use full handoff because the task identity, rather than a workspace binding,
+is transferred.
+
+Existing setup resource URLs remain readable, while new cards use setup v8,
+setup-chat v6, and Markdown-chat v3. Already mounted older widgets must be
+reloaded after deployment to receive this behavior. The textarea supports manual
 copying when clipboard access is unavailable, and polling preserves its selection.
-A static connector uses its fixed workspace without a selection call; transport-only
-workspaces cannot use `resumePath`. No setup secret or raw conversation ID is
-embedded in the prompt.
-
-Existing v1–v5 setup resource URLs remain readable, while new cards use
-v6. Already mounted copies of the old widget must be reloaded after deployment to
-receive this behavior. The model-facing setup continuation remains in the tool
-result but is not rendered to the user.
 
 This extra gate is necessary because ChatGPT's connector OAuth state controls
 whether the account can use the connector at all; it does not independently
@@ -792,7 +814,7 @@ ahead of the protected tools:
 
 | Tool | Description |
 |------|-------------|
-| `setup` | ChatGPT-facing authorization and status entry point. Checks the configured authentication token supplied as `ref`, caches only the conversation/transport grant, returns update, connector-schema, and current workspace state, and renders the compact setup component with the searchable project/scratch chooser without exposing the model-only continuation text |
+| `setup` | ChatGPT-facing authorization and status entry point. Checks the configured authentication token supplied as `ref`, caches only the conversation/transport grant, returns update, connector-schema, current workspace, and continuation-owner state, and renders the compact setup component with the searchable project/scratch chooser |
 
 Codex-compatible agent tools:
 
@@ -810,20 +832,21 @@ Codex-compatible agent tools:
 
 Codex's dotted names are flattened to underscores because MCP tool names must match `^[a-zA-Z0-9_-]{1,64}$`.
 
-Eight always-on tools have no Codex counterpart:
+Nine always-on tools have no Codex counterpart:
 
 | Tool | Description |
 |------|-------------|
 | `get_agent_brief` | Return the whole operating brief — behaviour, environment, saved state and project rules — in one call |
 | `get_environment` | Report the OS, the shell `exec_command` uses, the work directory, and unrestricted command authority plus its concurrent-session limit |
 | `get_project_doc` | Read the project's `AGENTS.md` instructions |
+| `continue_task` | Claim a one-time full-task continuation token before workspace selection, preserving the task identity and making the previous ChatGPT conversation read-only |
 | `self_update` | Download and verify the latest Codexify release, show its checksum-bound changelog in an updater card, then schedule a detached executable swap and service restart after explicit confirmation |
 | `remember` | Create one durable note under a new short key; existing keys are never overwritten |
 | `update_memory_note` | Replace one existing durable note without creating a missing key |
 | `forget_memory_note` | Delete one existing durable note |
 | `recall` | Return the plan and notes saved by earlier turns or earlier conversations |
 
-Three additional native tools exist solely for MCP App components and are advertised
+Five additional native tools exist solely for MCP App components and are advertised
 with app-only visibility:
 
 | Tool | Description |
@@ -831,6 +854,8 @@ with app-only visibility:
 | `check_for_updates` | Bypass the cached release inspection and return fresh structured update state to the setup component |
 | `doctor` | Run the same read-only diagnostic engine as `codexify doctor` against the active server configuration and return both its deterministic human report and structured checks to the setup component |
 | `self_update_status` | Read one durable update record by its opaque update ID and report the responding Codexify process version; not offered to the model by hosts that implement MCP Apps visibility |
+| `setup_status` | Re-read live setup, schema, workspace, continuation-owner, and update state without repeating model-facing setup authorization |
+| `setup_ui_prepare_continuation` | Issue the current task's one-time continuation token and return it only in component metadata when the user copies a continuation prompt |
 
 Multi-project mode adds two project-control tools:
 
@@ -841,7 +866,18 @@ Multi-project mode adds two project-control tools:
 
 These tools expose runtime context, project instructions, and the four durable memory/task-state operations through MCP. See [Context and memory](#context-and-memory), [Acting as a Codex agent](#acting-as-a-codex-agent), [Shells and the host](#shells-and-the-host), [AGENTS.md](#agentsmd) and [Skills](#skills).
 
-That is 34 advertised native tools in the default single-project mode and 36 in multi-project mode. Of those, 30 and 32 respectively are model-visible; `check_for_updates`, `setup_status`, `doctor`, and `self_update_status` are app-only. Enabling conversation authorization adds the ChatGPT-facing `setup` tool, producing 35 or 37 advertised tools and 31 or 33 model-visible tools. Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting `artifactEgress.enabled` to `false` independently removes `export_host_file`. Each disabled direction reduces the applicable count by one. One or more [catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one shared four-tool discovery/call surface regardless of how many transitive tools they contain. Direct mode adds one downstream tool per selected upstream tool; gateway mode adds one downstream dispatcher per upstream server.
+With default `uiWidgets=true`, that is 36 advertised native tools in
+single-project mode and 41 in multi-project mode. Of those, 31 and 33 respectively
+are model-visible; the rest are app-only setup, diagnostic, updater, continuation,
+and workspace helpers. Enabling conversation authorization adds the ChatGPT-facing
+`setup` tool, producing 37 or 42 advertised tools and 32 or 34 model-visible tools.
+Setting `artifactIngress.enabled` to `false` removes `import_host_file`; setting
+`artifactEgress.enabled` to `false` independently removes `export_host_file`. Each
+disabled direction reduces the applicable count by one. One or more
+[catalog-mode MCP upstreams](#catalog-mode-default-for-automatic-imports) add one
+shared four-tool discovery/call surface regardless of how many transitive tools
+they contain. Direct mode adds one downstream tool per selected upstream tool;
+gateway mode adds one downstream dispatcher per upstream server.
 
 MCP-specific tool behavior:
 
@@ -849,11 +885,12 @@ MCP-specific tool behavior:
 - **`exec_command` runs with plain pipes, not a PTY.** `tty: true` is rejected. Programs that require an attached terminal behave as piped processes. `shell` is a shell-type hint rather than an executable path: only the basename is considered, and an unavailable or unrecognized shell uses the platform fallback (`/bin/sh` on POSIX, `cmd.exe` on Windows).
 
 For ChatGPT calls carrying `_meta["openai/session"]`, an `exec_command` process
-belongs to that hashed conversation identity rather than the current MCP
+belongs to the resolved Codexify task identity rather than the current MCP
 transport. `write_stdin` can therefore resume or poll it after ChatGPT replaces
-the connector transport between adjacent tool calls. Generic MCP clients use
-transport-session ownership. Process handles are in memory only: they do not
-survive a Codexify restart, and `exec.idleTimeoutMs` expires abandoned sessions.
+the connector transport or after a full task handoff to another conversation.
+Generic MCP clients use transport-session ownership. Process handles are in
+memory only: they do not survive a Codexify restart, and `exec.idleTimeoutMs`
+expires abandoned sessions.
 
 `clock_sleep` caps at 5 minutes because a longer wait would outlive the HTTP request through the tunnel. Within that MCP-specific cap it follows Codex's interruption behavior: the timer races the request cancellation token, so a client that cancels the active tool call can end the sleep immediately.
 
@@ -1105,16 +1142,19 @@ After changing the flag, refresh the connector's tools in ChatGPT Settings and
 start a new conversation so its cached schemas and instructions match. Disabling
 the flag uses the same commands with `false`. It does not delete ticket state.
 
-The first model-facing tool call omits `codexify_ticket` and claims the conversation's
+The first ticketed model-facing tool call omits `codexify_ticket` and claims the conversation's
 chain. Its result contains an eight-character `new_codexify_ticket`. Every subsequent
-call passes the latest value as `codexify_ticket`. The server reserves it before
+ticketed call passes the latest value as `codexify_ticket`. The server reserves it before
 dispatch and replaces it at response handoff, including tool, argument-validation,
 and output-validation errors. A concurrent caller cannot claim a reserved ticket.
 The ticket is returned in both structured content and
 a small text block, after output truncation. Native tools and all upstream MCP
 exposure modes are guarded centrally. App-only widget helpers and protocol-level
 discovery/resource requests (`tools/list`, `resources/list`, `resources/read`)
-do not participate. A displayed tool such as `setup` or
+do not participate. `continue_task` is also exempt: its random one-time token and
+idempotent completed-claim receipt provide the exclusivity and replay handling
+needed for a handoff, without risking a lost ticket successor during ownership
+transfer. A displayed tool such as `setup` or
 `show_diff` is still guarded; repeatedly calling `setup` cannot reset an active chain.
 The setup widget uses its private project/update actions even when Markdown chat
 is disabled, so user interactions never consume the agent's ticket.
@@ -1573,14 +1613,25 @@ Diff state is initialized immediately before the first project-scoped tool call 
 
 Snapshots use Git objects, but they do **not** touch the real index or working tree. Codexify builds a private temporary index containing only the logical project root, then carries the same literal pathspec through every comparison. If the selected project is `packages/app` inside a monorepo, sibling changes under `packages/other` cannot enter its checkpoint or diff. Paths in the component-only diff payload are relative to the selected project, not the repository root.
 
-With ChatGPT's stable `_meta["openai/session"]`, each conversation/project scope stores exactly two namespaced refs under:
+With ChatGPT's stable `_meta["openai/session"]`, each Codexify task/project scope stores exactly two namespaced refs under:
 
 ```text
-refs/codexify/diff/<project-hash>/<conversation-hash>/project-open
-refs/codexify/diff/<project-hash>/<conversation-hash>/last-diff
+refs/codexify/diff/<project-hash>/<task-hash>/project-open
+refs/codexify/diff/<project-hash>/<task-hash>/last-diff
 ```
 
-The raw conversation identifier is never written. The refs survive MCP reconnects and Codexify restarts. Generic MCP clients receive transport-local in-memory checkpoints instead. Each conversation/project pair retains only its current two referenced snapshots; unreferenced synthetic commits are ordinary Git-GC candidates. To inspect or remove current refs manually, use `git for-each-ref refs/codexify/diff/` and `git update-ref -d <ref>`. Removing both refs resets that owner to the current scoped state on its next project call. Existing `refs/codexify/review/.../project-open` and `.../last-review` refs are copied lazily into the diff namespace and retained so installations from the current review-named surface keep their checkpoints.
+The raw conversation identifier is never written. An ordinary task initially uses
+the originating conversation's private hash; full continuation keeps that task
+hash while changing the physical ChatGPT owner. The refs therefore survive MCP
+reconnects, Codexify restarts, and full task handoffs. Generic MCP clients receive
+transport-local in-memory checkpoints instead. Each task/project pair retains only
+its current two referenced snapshots; unreferenced synthetic commits are ordinary
+Git-GC candidates. To inspect or remove current refs manually, use
+`git for-each-ref refs/codexify/diff/` and `git update-ref -d <ref>`. Removing both
+refs resets that owner to the current scoped state on its next project call.
+Existing `refs/codexify/review/.../project-open` and `.../last-review` refs are
+copied lazily into the diff namespace and retained so installations from the
+review-named surface keep their checkpoints.
 
 With `uiWidgets=true` (the default), Codexify advertises the standard MCP Apps extension and serves a self-contained diff resource at `ui://codexify/diff/v5/mcp-app.html`. Compatible ChatGPT developer connectors render `show_diff` as the interactive GitHub-style file/statistic/patch card from component-only result metadata; the component is model-visible but is not granted app-side tool access. Other clients receive the concise text result. Existing review metadata and the v3, v2, and unversioned `ui://codexify/review/...` resources remain readable so existing cards can remount, while current `show_diff` results emit only the diff-named metadata. Code text is 12 px on desktop and 10 px at widget widths of 520 px or less, with larger file labels and controls. Indented identifiers can wrap within the remaining line width rather than leaving a whitespace-only first visual line; source whitespace and highlighting are preserved. The previous diff v4 and v3 resources remain readable. Expansion state is persisted as private widget state, including migration of `reviewOpen` to `diffOpen`. Cursor advancement completes before the result is returned and never waits for widget interaction, and the card updates at the `show_diff` tool-call boundary rather than continuously watching the filesystem. With `uiWidgets=false`, the widget resource and component payload are not advertised or emitted, and patch generation is skipped.
 
@@ -1600,9 +1651,27 @@ That line matters as much as the cap. Silent truncation reads as "that was the w
 
 Task state lives in `~/.codexify/projects/<name>-<hash>/memory.json`, keyed by the absolute active project or scratch root. Nothing is written into a selected source repository, and two checkouts or scratch workspaces do not share notes unless they resolve to the same active root.
 
-ChatGPT project bindings live separately under `~/.codexify/conversation-projects/<access-root-hash>/<conversation-hash>.json`; scratch choices use a sibling `.no-project` marker that records the exact canonical scratch path. The raw `openai/session` value is never written to disk; only its SHA-256-derived key is used. Durable scratch content lives beneath `~/.codexify/scratch/conversations/<access-root-hash>/<conversation-hash>/` with private Unix permissions. Missing, stale, symlinked, relocated, or conflicting state fails closed rather than silently rebinding or replacing the workspace.
+ChatGPT project bindings live separately under
+`~/.codexify/conversation-projects/<access-root-hash>/<task-hash>.json`; scratch
+choices use a sibling `.no-project` marker that records the exact canonical
+scratch path. The raw `openai/session` value is never written to disk; only its
+SHA-256-derived key is used. Durable scratch content lives beneath
+`~/.codexify/scratch/conversations/<access-root-hash>/<task-hash>/` with private
+Unix permissions. A full continuation maps the replacement conversation to the
+same task hash instead of copying these records. Missing, stale, symlinked,
+relocated, or conflicting state fails closed rather than silently rebinding or
+replacing the workspace.
 
-In single-project mode, `instructions` is rebuilt for every MCP session, so a new conversation opens with the saved plan and notes already in front of it, under a `## Saved state` heading between the environment and `AGENTS.md`. In multi-project mode the initialize-time instructions deliberately remain project-neutral: ChatGPT supplies its stable conversation identifier on tool calls, after the MCP initialize exchange. Calling `get_agent_brief` restores an existing project or scratch binding automatically; for a new conversation it reports that one workspace choice is required and directs the model to an exact `set_project_root` call or the setup-card/listing flow. After binding, `get_agent_brief` returns the environment, saved state, skills, and applicable project instructions from the active root.
+In single-project mode, `instructions` is rebuilt for every MCP session, so a new
+conversation opens with the workspace's saved plan and notes already in front of
+it, under a `## Saved state` heading between the environment and `AGENTS.md`. In
+multi-project mode the initialize-time instructions deliberately remain
+project-neutral: ChatGPT supplies its stable conversation identifier on tool calls,
+after the MCP initialize exchange. Calling `get_agent_brief` restores an existing
+task binding automatically; an ordinary new conversation is directed to
+`set_project_root`, while a continuation prompt calls `continue_task` first.
+After either path, `get_agent_brief` returns the environment, saved state, skills,
+and applicable project instructions from the active root.
 
 The division of labour is worth keeping straight: `AGENTS.md` is what is true of the **project** and belongs in the repo; notes are what is true of the **task in flight** and belong here.
 
@@ -1671,11 +1740,13 @@ selection, or resumption. Existing files are never overwritten during setup.
 The base directory follows `memory.dir` when customized; `memory.enabled` does
 not disable Markdown chat. Keep a custom metadata directory outside the project
 to avoid including conversations in repository searches, commits, or exports.
-Different conversations use different files even with worktrees disabled.
-Reconnecting the same ChatGPT conversation preserves its file and cursor.
-Resuming a workspace from a new conversation creates a new channel rather than
-silently importing the previous chat. Clients without stable conversation
-metadata have transport-scoped files and in-memory cursors instead.
+Ordinary independent conversations use different files even with worktrees
+disabled. Reconnecting the same ChatGPT conversation preserves its file and
+cursor. A full `continue_task` handoff maps the new physical conversation to the
+same task channel, so it keeps the existing transcript, read cursor, delivery
+receipts, timestamps, and activity. `resumePath` remains workspace-only and still
+creates a separate channel. Clients without stable conversation metadata have
+transport-scoped files and in-memory cursors instead.
 
 Append user messages at the bottom and save as UTF-8. Do not rewrite prior text,
 change line endings, or delete the file while an agent is active. An editor's
@@ -1800,7 +1871,7 @@ separate OS account or sandbox if connector users must not access owner data.
 #### Embedded ChatGPT widget
 
 When both `agentChat.enabled` and `uiWidgets` are enabled, `setup` advertises
-`ui://codexify/setup-chat/v3/mcp-app.html`. Call setup once per conversation: its
+`ui://codexify/setup-chat/v6/mcp-app.html`. Call setup once per conversation: its
 card contains the workspace controls and one persistent chat panel. `chat_read`,
 `chat_write`, and `chat_await` do not advertise a widget or create additional
 cards. Their messages appear in the existing panel, which remains usable during
@@ -1812,6 +1883,12 @@ sends; Shift+Return inserts a newline. Input-method composition does not send a
 message. Setup status refreshes and workspace-control rerenders preserve the
 panel, its scroll position, and its unfinished draft.
 
+After a full task continuation, the old physical conversation keeps polling and
+rendering the shared transcript but shows a read-only notice and disables its
+composer. The replacement conversation and standalone owner chat remain writable.
+Both the live setup status and `chat_ui_state` carry the retired flag, so a stale
+historical widget result cannot make the old card writable again.
+
 The panel loads the latest page and offers **Load earlier messages**
 for history. Visible cards recheck state every two seconds; collapsed, off-screen,
 hidden, or torn-down cards stop polling. Connection errors back off and retain
@@ -1820,7 +1897,7 @@ state. No background follow-up message is posted to ChatGPT, and the widget does
 not claim that a stopped agent can be restarted by sending to the file.
 
 The header shows the total number of model-visible Codexify tool calls recorded
-for the conversation. Compact labels between messages show the calls in each
+for the task. Compact labels between messages show the calls in each
 interval. Both agent messages and saved user messages snapshot the count, so
 sending a user message leaves earlier calls above it; only subsequent calls
 appear below it. The pending bubble uses the last observed count until its send
@@ -1933,7 +2010,8 @@ Set `uiWidgets` to `false` to keep the three agent chat tools and file-based
 communication but disable the cards and their app-only actions. Refresh the
 connector and start a new conversation after upgrading from the earlier chat
 widget schema (`+markdown-chat` through `+markdown-chat-v4` to
-`+markdown-chat-v5`). Already mounted older
+`+markdown-chat-v5`) or before using the new `+continuation-v1` tool schema.
+Already mounted older
 cards cannot be removed by the server; new write/wait calls no longer create
 them once the host uses the new tool metadata. The feature remains disabled by
 default; installation alone does not enable it.
@@ -2456,8 +2534,8 @@ Native tunnel mode ignores `allowedHosts` and forces the accepted authorities to
 - **Bounded durable native-file egress**: `export_host_file` accepts only a relative regular-file path inside the active project, opens it through a capability-confined directory handle without following the final symlink/reparse point, rejects traversal and escapes, enforces `artifactEgress.maxFileBytes` before and during streaming, and returns an original SHA-256 receipt plus a standard MCP resource link. The link carries a random 256-bit opaque capability rather than a local path. A private versioned record survives service restarts; eligible immutable snapshots share a global per-user LRU disk budget controlled by `snapshotMaxFileBytes` and `maxSnapshotBytes`. After snapshot eviction, `fallbackToSource` can serve the latest safe file only after revalidating the recorded root and relative path. Audit output records only the number of resource links, never their capabilities or filenames.
 - **Bounded transitive resource egress**: a `resource_link` returned by any bridged MCP tool is never passed downstream with its upstream URI. Codexify replaces it with a random 256-bit `codexify://upstream-resource/...` capability tied to that exact upstream peer and URI. `resources/read` forwards through the existing authenticated MCP transport, propagates downstream cancellation, applies the upstream tool timeout, enforces `artifactEgress.maxFileBytes` against advertised and actual content size, rewrites returned content URIs back to the opaque capability, and expires/evicts mappings according to the configured TTL/reference bounds.
 - **One bounded exception in single-project mode**: [AGENTS.md](#agentsmd) discovery may read above `--work-dir`, up to the nearest `.git`. It is read-only, opens only `AGENTS.override.md`, `AGENTS.md` and any `projectDoc.fallbackFilenames`, and `get_project_doc` reports the absolute path of every file it used. Set `projectDoc.maxBytes` to `0` to switch it off, or `projectDoc.rootMarkers` to `[]` to keep the search inside the work directory. Multi-project mode does not perform this upward walk; its selected directory is the exact project root.
-- **Namespaced diff state inside Git**: ChatGPT diff checkpoints are exactly two refs per conversation/project pair under `refs/codexify/diff/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. Existing `refs/codexify/review/` checkpoints are migrated lazily into the diff namespace. The namespace grows with the number of distinct persistent conversation/project pairs; the diff section documents inspection and manual removal.
-- **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode writes one small project-binding record or scratch marker under `~/.codexify/conversation-projects/` for each ChatGPT conversation and access root; durable scratch contents live separately under `~/.codexify/scratch/conversations/`. Per-conversation authorization writes a small marker under `~/.codexify/conversation-authorizations/`. Native file export writes durable capability records and an LRU-bounded immutable snapshot pool under `~/.codexify/artifacts/`; records remain after snapshot eviction so old conversation links can use source fallback. Binding and authorization filenames are derived from a hash of `openai/session`; the raw identifier is not stored. Authorization namespaces include a one-way digest of the canonical work directory and configured token, while marker contents store only the grant. Set `memory.enabled` to `false` to disable plans and notes; set `artifactEgress.enabled` to `false` to disable new native exports and bridged resource proxying. Delete only state whose capabilities or bindings you intentionally want to invalidate. See [Context and memory](#context-and-memory).
+- **Namespaced diff state inside Git**: ChatGPT diff checkpoints are exactly two refs per task/project pair under `refs/codexify/diff/`. Synthetic snapshots contain only the selected project path, are built through a temporary index, and never modify the real index or working tree. Generic MCP-client checkpoints are in memory only. Existing `refs/codexify/review/` checkpoints are migrated lazily into the diff namespace. The namespace grows with the number of distinct persistent task/project pairs; the diff section documents inspection and manual removal.
+- **Bounded state writes outside the work directory**: `remember` and `update_plan` write `memory.json` under `~/.codexify/projects/`. Multi-project mode writes one small task-binding record or scratch marker under `~/.codexify/conversation-projects/`; durable scratch contents live separately under `~/.codexify/scratch/conversations/`. Full handoffs add a bounded private ownership/alias/token-digest document under `~/.codexify/conversation-continuations/`; raw continuation tokens and raw `openai/session` values are not stored. Physical-conversation authorization writes a small marker under `~/.codexify/conversation-authorizations/`. Native file export writes durable capability records and an LRU-bounded immutable snapshot pool under `~/.codexify/artifacts/`; records remain after snapshot eviction so old conversation links can use source fallback. Binding and authorization filenames are derived from a hash of `openai/session`. Authorization namespaces include a one-way digest of the canonical work directory and configured token, while marker contents store only the grant. Set `memory.enabled` to `false` to disable plans and notes; set `artifactEgress.enabled` to `false` to disable new native exports and bridged resource proxying. Delete only state whose capabilities or bindings you intentionally want to invalidate. See [Context and memory](#context-and-memory).
 - **Bounded reads outside the work directory**: [skills](#skills) may live in `~/.agents/skills`, `~/.codex/skills`, or an enabled installed Codex plugin. Automatic reads of `~/.claude/skills` and the Claude plugin registry require `experimental.claudeSkills`. Codex plugin discovery reads only Codex's user config, active plugin-cache package, manifest, and declared skill roots; `skills_read` then opens files only inside a discovered skill package. Its `resource` path is checked against the skill's own directory, so it cannot walk out into the rest of your home directory. `skills_list` reports the absolute path of every skill it found. Set `skills.enabled` to `false` to switch it off, `skills.includePlugins` to `false` to suppress plugin packages, or `skills.dirs` to point the standalone user scope somewhere you choose.
 - **Read-only Codex configuration discovery**: MCP import and the project catalogue read the user-level Codex `config.toml` without rewriting it. Project discovery inspects only the top-level `projects` table, does not read candidate project contents, and suppresses rejected absolute paths from MCP output. Set `projectCatalog.codexConfig.enabled` to `false` to disable that provider. Native Codex trust does not override the Codexify access-root boundary.
 - **Command execution authority**: `exec_command` performs no command allow-listing or shell-token filtering. Every non-empty command runs through the selected shell with the full authority of the Codexify process. `exec.maxSessions`, `exec.idleTimeoutMs`, and output limits bound resources; they do not restrict what a command may do.
@@ -2528,8 +2606,10 @@ checkouts with no usage record show **Not recorded**, not an inferred date.
 The list includes managed and ordinary Git worktrees and the source checkout.
 Selecting an existing entry overrides the create-worktree preference and reuses
 its files, branch and uncommitted changes unchanged. This works in a new
-conversation as well as after a workspace switch. Reuse never transfers another
-conversation's messages or running command sessions; avoid concurrent edits.
+conversation as well as after a workspace switch. Manual worktree reuse transfers
+only the workspace; it does not attach another task's messages, diff state, or
+running command sessions. Use the setup card's full continuation prompt when the
+new conversation should take over the whole Codexify task.
 
 **Switch to another project** calls an app-only action using the currently
 displayed path. A stale card cannot reset a different selection. Prior binding
@@ -2543,7 +2623,7 @@ are blocked until that brief is read. The notice includes previous/current paths
 and directs the agent to reload AGENTS.md, environment, skills and saved state.
 This also works without Markdown chat. A pending `chat_await` wakes on the switch.
 The chat panel remains mounted and preserves an unsent draft; transcripts stay
-in their existing per-workspace, per-conversation metadata locations.
+in their existing per-workspace, per-task metadata locations.
 
 The panel tracks the actual selected workspace, not only whether one is selected.
 A changed workspace resets history, pagination, receipt offsets, and counters
@@ -2574,7 +2654,7 @@ is still required; anonymous requests are not attributed to another caller.
 The widget compares the running schema, the recorded tunnel/connector schema,
 and this conversation's original setup marker. An old connector shows Refresh.
 A current connector with an old conversation shows **Start a new conversation**,
-with a copyable continuation prompt using the exact active worktree path. Only
+with a copyable continuation prompt created from a one-time task token. Only
 version strings are compared; there are no schema fingerprints. Separate
 connector installations sharing one tunnel cannot be distinguished when discovery
 is anonymous; configure a separate tunnel for independently tracked installations.

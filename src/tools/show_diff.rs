@@ -155,7 +155,7 @@ impl Tool for ShowDiff {
             config,
             session,
             &context.diff_checkpoints,
-            context.conversation.as_ref(),
+            context.task_conversation.as_ref(),
         )
         .await
     }

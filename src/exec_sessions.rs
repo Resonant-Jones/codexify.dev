@@ -1069,6 +1069,11 @@ impl SessionState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn shares_exec_state(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.exec, &other.exec)
+    }
+
     /// The stable per-transport identifier stamped into audit-log events.
     pub fn audit_id(&self) -> u64 {
         self.audit_id

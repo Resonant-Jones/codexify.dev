@@ -456,6 +456,7 @@ async fn workspace_switch_notices_are_present_even_without_markdown_chat() {
 #[tokio::test]
 async fn tunnel_routes_attribute_anonymous_discovery_without_cross_tunnel_or_chat_updates() {
     use rmcp::transport::StreamableHttpClientTransport;
+    crate::tls::ensure_crypto_provider();
     let root = tempfile::tempdir().unwrap();
     let first_store = Arc::new(crate::connector_schema::ConnectorSchemaStore::new(
         Some(root.path().join("schema-first")),
@@ -529,13 +530,16 @@ async fn tunnel_routes_attribute_anonymous_discovery_without_cross_tunnel_or_cha
     );
     assert!(second_store.connector_version(None).is_none());
     let conversation = ConversationIdentity::from_openai_session("old-schema").unwrap();
+    let schema_version = crate::connector_schema::schema_version(&crate::config::default_config(
+        root.path().to_path_buf(),
+    ));
     first_store
         .remember_conversation_version(&conversation, "old")
         .unwrap();
     a.list_tools(None).await.unwrap();
     assert_eq!(
         first_store.connector_version(None).as_deref(),
-        Some(env!("CARGO_PKG_VERSION"))
+        Some(schema_version.as_str())
     );
     assert!(second_store.connector_version(None).is_none());
     let probe = b
@@ -552,10 +556,7 @@ async fn tunnel_routes_attribute_anonymous_discovery_without_cross_tunnel_or_cha
         .call_tool(CallToolRequestParams::new("connector_schema_probe"))
         .await
         .unwrap();
-    assert_eq!(
-        probe.structured_content.unwrap()["content"],
-        env!("CARGO_PKG_VERSION")
-    );
+    assert_eq!(probe.structured_content.unwrap()["content"], schema_version);
     assert_eq!(
         first_store.conversation_version(&conversation).as_deref(),
         Some("old")

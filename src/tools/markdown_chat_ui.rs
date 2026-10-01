@@ -96,8 +96,8 @@ impl Tool for ChatUiTool {
     }
     fn description(&self) -> String {
         match self {
-            Self::Send => "App-only: append the user's Markdown to this conversation's CHAT.md. Reusing request_id with the same text is idempotent. Does not acknowledge or deliver text to the agent.",
-            Self::State => "App-only: read a page of this conversation's chat history and delivery receipts without acknowledging messages. No arbitrary path or conversation selector is accepted.",
+            Self::Send => "App-only: append the user's Markdown to this Codexify task's CHAT.md. Reusing request_id with the same text is idempotent. Does not acknowledge or deliver text to the agent.",
+            Self::State => "App-only: read a page of this Codexify task's chat history and delivery receipts without acknowledging messages. No arbitrary path or task selector is accepted.",
             Self::File => "App-only: resolve an exported or project-relative Markdown file link in the active workspace for a user-requested download. Sandbox names must match an unambiguous prior export. Does not read or acknowledge chat messages.",
         }.into()
     }
@@ -163,13 +163,14 @@ impl Tool for ChatUiTool {
         if context.cancellation.is_cancelled() {
             return ToolResult::error("Chat widget request was cancelled.");
         }
-        let chat = match context
-            .markdown_chat
-            .chat(config, context.conversation.as_ref(), session)
-        {
-            Ok(chat) => chat,
-            Err(error) => return ToolResult::error(error),
-        };
+        let chat =
+            match context
+                .markdown_chat
+                .chat(config, context.task_conversation.as_ref(), session)
+            {
+                Ok(chat) => chat,
+                Err(error) => return ToolResult::error(error),
+            };
         match self {
             Self::File => {
                 let FileArgs {
@@ -249,7 +250,7 @@ impl Tool for ChatUiTool {
                 }
                 if let Some(activity) = context
                     .markdown_chat
-                    .agent_activity(context.conversation.as_ref(), session)
+                    .agent_activity(context.task_conversation.as_ref(), session)
                     && let Err(error) = chat.sync_agent_activity(activity).await
                 {
                     return ToolResult::error(error);
@@ -258,6 +259,7 @@ impl Tool for ChatUiTool {
                     Ok(page) => {
                         let mut page = serde_json::to_value(page).expect("chat page");
                         page["workspace_path"] = json!(config.work_dir);
+                        page["retired"] = json!(context.conversation_retired);
                         private_result(page)
                     }
                     Err(error) => ToolResult::error(error),

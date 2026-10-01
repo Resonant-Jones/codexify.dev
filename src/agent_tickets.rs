@@ -20,7 +20,7 @@ pub(crate) const OUTPUT_DESCRIPTION: &str =
     "Pass this as codexify_ticket on the next tool call, even after an error.";
 pub(crate) const INSTRUCTIONS: &str = concat!(
     "## Agent tickets\n\nAgent tickets are enabled. Omit codexify_ticket until the first response supplies new_codexify_ticket. ",
-    "Then pass the latest new_codexify_ticket as codexify_ticket on every Codexify model-facing tool call, including setup, chat, polling, and MCP discovery tools. ",
+    "Then pass the latest new_codexify_ticket as codexify_ticket on every Codexify model-facing tool call, including setup, chat, polling, and MCP discovery tools, except `continue_task`, whose one-time continuation token is its own replay-safe claim. ",
     "Call Codexify tools serially and wait for each result; accepted connector error responses also return a new_codexify_ticket. ",
     "A transport failure supplies no replacement: keep the previous ticket, and do not blindly repeat an operation that may already have run. ",
     "A ticket rejection means another branch may have claimed or advanced the chain, or a response was lost. ",

@@ -47,6 +47,7 @@ button { font: inherit; }
 .continuation-prompt { width: 100%; min-height: 140px; resize: vertical; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: 12px/1.45 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
 .continuation-prompt:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
 .continuation-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.retired-notice { margin-top:8px; padding:9px; border:1px solid var(--warn); border-radius:8px; background:var(--panel); color:var(--text); }
 .status-row {
   display: flex;
   min-width: 0;
@@ -311,6 +312,7 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
   "use strict";
 
   const DEBUG_META_KEY = "io.github.devnoname120/codexify/debug";
+  const CONTINUATION_META_KEY = "io.github.devnoname120/codexify/continuation";
   const PROJECT_RESULT_LIMIT = 50;
   const root = document.getElementById("root");
   const pending = new Map();
@@ -395,7 +397,7 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
   function actionButton(label, className, handler, disabled) {
     const button = el("button", `button${className ? ` ${className}` : ""}`, label);
     button.type = "button";
-    button.disabled = Boolean(disabled);
+    button.disabled = Boolean(disabled || isRetired());
     button.addEventListener("click", handler);
     return button;
   }
@@ -450,6 +452,20 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
       && typeof candidate.active_root === "string"
       && candidate.active_root.length > 0
     );
+  }
+
+  function continuationPayload(value) {
+    return objectFrom(value, candidate => {
+      const payload = candidate[CONTINUATION_META_KEY];
+      return payload
+        && typeof payload.token === "string"
+        && typeof payload.workspace === "string"
+        ? payload : null;
+    });
+  }
+
+  function isRetired() {
+    return currentData?.continuation?.retired === true;
   }
 
   function toolFailureText(value) {
@@ -682,6 +698,7 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
     }
     chatHost.hidden = false;
     chatController.setTheme({ theme:document.documentElement.dataset.theme || window.openai?.theme });
+    chatController.setReadOnly?.(isRetired());
     const selected = ["selected", "without_project", "static"].includes(currentData.project?.status);
     if (selected && !currentData.project?.activePath) chatController.setAvailable(!projectSelecting);
     else chatController.setWorkspace(selected ? currentData.project.activePath : null, !projectSelecting);
@@ -812,30 +829,42 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
 
   function continuationView() {
     if (!hasLiveStatus || (!statusFresh && !statusRefreshing)
-      || currentData.connectorSchema.status !== "conversation_stale") return null;
+      || currentData.connectorSchema.status !== "conversation_stale" || isRetired()) return null;
     const project = currentData.project || {};
     if (project.status === "check_failed") {
       return { help: "Resolve the workspace error before preparing a continuation. Do not select a replacement checkout.", prompt: null };
     }
     const setup = "Continue my previous task using the same Codexify connector. Complete its normal setup for this new conversation if required.";
-    const context = "Then call get_agent_brief and recall. Read the saved plan and continuation-handoff note, inspect the current files and Git status where applicable, and continue from the recorded next steps. Previous conversation messages and running command sessions are not transferred. If the saved context is missing or insufficient, ask me for the task summary instead of guessing. Do not edit this workspace concurrently from the old and new conversations.";
     if (project.status === "unselected") {
       return { help: "No workspace has been selected. Copy this prompt and add your task summary in the new conversation.", prompt: `${setup}\n\nNo workspace was selected in the previous conversation. Choose a workspace only when the task makes that choice clear. Ask me for the task summary if it is not provided.`, handoff: false };
     }
     if (!project.activePath || !["selected", "without_project"].includes(project.status)) {
       return { help: "Check the workspace status before preparing a continuation.", prompt: null };
     }
-    if (project.bindingScope === "static") {
-      return { help: "This connector uses a fixed workspace. Prepare a handoff, then copy the prompt into a new conversation using the same connector.", prompt: `${setup}\n\nThe fixed workspace must still be ${JSON.stringify(project.activePath)}. Check get_environment before proceeding; stop if the path differs. Do not call set_project_root.\n\n${context}`, handoff: true };
-    }
     if (project.bindingScope !== "chatgpt_conversation") {
+      if (project.bindingScope === "static") {
+        return {
+          help: "Prepare a handoff, then continue this Codexify task in a new ChatGPT conversation. The workspace and task state stay attached; the old conversation becomes read-only after the new one claims it.",
+          prompt: "Click Copy continuation prompt to create a one-time handoff prompt.",
+          handoff: true,
+          tokenized: true,
+          workspace: project.activePath
+        };
+      }
       return { help: "This host uses a transport-only workspace that cannot be resumed by this prompt. Save or export its files and task summary before continuing elsewhere.", prompt: null };
     }
     return {
-      help: "Prepare a handoff to save task context, then copy this prompt into a new conversation using the same connector. It reuses this exact workspace; it does not copy chat history.",
-      prompt: `${setup}\n\nBefore selecting any project, call set_project_root with exactly:\n${JSON.stringify({ resumePath: project.activePath })}\n\nReuse that existing workspace, including uncommitted changes. Do not create a worktree, clone, pull, reset, switch branches, or fall back to the source checkout. If resuming fails, stop and report the error.\n\n${context}`,
-      handoff: true
+      help: "Prepare a handoff, then continue this Codexify task in a new ChatGPT conversation. The workspace, agent-chat history, saved plan, memory, command sessions, and task state stay attached. Once the new conversation claims it, this conversation becomes read-only.",
+      prompt: "Click Copy continuation prompt to create a one-time handoff prompt.",
+      handoff: true,
+      tokenized: true,
+      workspace: project.activePath
     };
+  }
+
+  function continuationPrompt(token) {
+    const call = JSON.stringify({ continuationToken:token });
+    return `Continue my previous Codexify task using the same connector. Complete its normal setup for this new conversation if required.\n\nBefore selecting any workspace, call continue_task with exactly:\n${call}\n\nThis reconnects the same Codexify task, including its workspace, agent-chat history, saved plan, memory, command sessions, and task state. The previous conversation becomes read-only after this succeeds. Then call get_agent_brief and recall, inspect the current files and Git status where applicable, and continue from the recorded next steps. Do not call set_project_root first and do not create, clone, reset, or switch to another workspace.`;
   }
 
   function renderContinuation() {
@@ -881,19 +910,40 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
 
   async function copyContinuation() {
     if (!statusFresh || statusRefreshing) return;
+    const view = continuationView();
     const field = document.getElementById("continuation-prompt");
     const feedback = document.getElementById("continuation-feedback");
-    if (!field || !feedback) return;
+    if (!field || !feedback || !view) return;
+    const button = document.getElementById("continuation-copy");
+    let promptReady = !view.tokenized;
     try {
+      if (view.tokenized) {
+        if (button) button.disabled = true;
+        feedback.textContent = "Preparing continuation prompt…";
+        const result = await callTool("setup_ui_prepare_continuation", {});
+        const failure = toolFailureText(result);
+        if (failure) throw new Error(failure);
+        const prepared = continuationPayload(result);
+        if (!prepared || prepared.token.length !== 43) throw new Error("The connector returned no valid continuation token.");
+        if (prepared.workspace !== view.workspace) throw new Error("The selected workspace changed. Wait for the setup card to refresh, then try again.");
+        field.value = continuationPrompt(prepared.token);
+        promptReady = true;
+      }
       if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
       await navigator.clipboard.writeText(field.value);
       feedback.textContent = "Copied. Paste into a new conversation using the same connector.";
-    } catch {
+    } catch (error) {
       if (document.getElementById("continuation-prompt") !== field) return;
       field.focus();
       field.select();
       field.setSelectionRange(0, field.value.length);
-      feedback.textContent = "Automatic copying is unavailable. The prompt is selected; copy it manually.";
+      feedback.textContent = promptReady
+        ? "Automatic copying is unavailable. The prompt is selected; copy it manually."
+        : `Could not prepare the continuation prompt: ${errorText(error)}`;
+    } finally {
+      if (button && document.getElementById("continuation-copy") === button) {
+        button.disabled = !statusFresh || statusRefreshing || actionState.pending || isRetired();
+      }
     }
   }
 
@@ -1432,6 +1482,9 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
       : null;
     root.replaceChildren();
     const card = el("section", "card");
+    if (isRetired()) {
+      card.append(el("div", "retired-notice", "This Codexify task continued in another ChatGPT conversation. This conversation is now read-only."));
+    }
     const statuses = el("div", "status-list");
     statuses.append(...[renderUpdateRow(), renderSchemaRow()].filter(Boolean));
     card.append(statuses);
@@ -1480,6 +1533,15 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
           nextSearch.setSelectionRange(restoreSearch.start, restoreSearch.end);
         }
       }
+    }
+    if (isRetired()) {
+      const disable = node => {
+        for (const child of Array.from(node.children || [])) {
+          if (["button", "input", "textarea", "select"].includes(String(child.tagName || "").toLowerCase())) child.disabled = true;
+          disable(child);
+        }
+      };
+      disable(card);
     }
     scheduleSizeReport();
   }
@@ -1764,7 +1826,7 @@ dialog.refresh-popover::backdrop { background:rgb(0 0 0 / .48); }
     if (firstPayload) conversationSchemaVersion = payload.connectorSchema.observedVersion || null;
     // Historical tool-result notifications must not replace a newer live check.
     currentData = hasLiveStatus && currentData
-      ? { ...payload, serverVersion: currentData.serverVersion, worktreeMode: currentData.worktreeMode, update: updateState, connectorSchema: currentData.connectorSchema, project: currentData.project }
+      ? { ...payload, serverVersion: currentData.serverVersion, worktreeMode: currentData.worktreeMode, update: updateState, connectorSchema: currentData.connectorSchema, project: currentData.project, continuation:currentData.continuation }
       : payload;
     applyWorktreeDefault();
     currentMetadata = value || currentMetadata;

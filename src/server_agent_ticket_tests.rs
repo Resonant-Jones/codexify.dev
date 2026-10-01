@@ -35,6 +35,21 @@ fn agent_tickets_only_augment_enabled_model_tool_schemas() {
         enabled.output_schema.as_ref().unwrap()["properties"]["new_codexify_ticket"]["type"],
         "string"
     );
+
+    let continuation = advertised_tool(
+        &crate::tools::continuation::ContinueTask,
+        &ticket_test_config(root.path(), true),
+    );
+    assert!(
+        continuation.input_schema["properties"]
+            .get("codexify_ticket")
+            .is_none()
+    );
+    assert!(
+        continuation.output_schema.as_ref().unwrap()["properties"]
+            .get("new_codexify_ticket")
+            .is_none()
+    );
 }
 
 struct TicketProbe {
@@ -532,15 +547,16 @@ fn agent_tickets_native_schemas_are_valid_with_chat_and_workspace_fields() {
             (**advertised.output_schema.as_ref().unwrap()).clone(),
         ))
         .unwrap();
+        let ticketed = ticketed_model_tool(tool.as_ref(), &config);
         assert_eq!(
             advertised.input_schema["properties"]
                 .get("codexify_ticket")
                 .is_some(),
-            !app_only_tool(tool.as_ref()),
+            ticketed,
             "{}",
             tool.name()
         );
-        if !app_only_tool(tool.as_ref()) {
+        if ticketed {
             assert_eq!(
                 advertised.annotations.as_ref().unwrap().idempotent_hint,
                 Some(false)

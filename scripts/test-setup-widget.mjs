@@ -6,6 +6,7 @@ import vm from "node:vm";
 const html = readFileSync(new URL("../src/setup_ui.html", import.meta.url), "utf8");
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const drain = () => new Promise(resolve => setImmediate(resolve));
+const CONTINUATION_META = "io.github.devnoname120/codexify/continuation";
 
 class Events {
   listeners = new Map();
@@ -76,7 +77,8 @@ function payload(status, conversation = "1.2.3") {
       status, advertisedVersion: "1.2.4", observedVersion: conversation,
       connectorVersion: status === "stale" ? "1.2.3" : status === "unknown" ? null : "1.2.4",
       refreshRecommended: status === "stale"
-    }
+    },
+    continuation: { retired:false }
   };
 }
 
@@ -91,7 +93,7 @@ function harness(initial, live = initial) {
     createTextNode: text => { const node = new Element("#text"); node.ownText = text; return node; },
     getElementById: id => body.querySelector(`#${id}`)
   });
-  const state = { live: structuredClone(live), fail: false, calls: [], links: [], messages: [], clipboard: [], clipboardDenied: false, now: 0 };
+  const state = { live: structuredClone(live), fail: false, calls: [], links: [], messages: [], clipboard: [], clipboardDenied: false, now: 0, continuationSequence:0 };
   const timers = new Map(); let nextTimer = 1;
   const timer = (callback, delay, interval = false) => {
     const id = nextTimer++; timers.set(id, { callback, delay, interval }); return id;
@@ -106,6 +108,11 @@ function harness(initial, live = initial) {
       return { structuredContent: structuredClone(state.live) };
     }
     if (name === "doctor") return { structuredContent: { ok: true, summary: { failures: 0, warnings: 0 }, checks: [] } };
+    if (name === "setup_ui_prepare_continuation") {
+      state.continuationSequence += 1;
+      const token = String(state.continuationSequence).padStart(43, "A");
+      return { content:[{ type:"text", text:"Continuation prompt ready." }], structuredContent:{ content:"Continuation prompt ready." }, _meta:{ [CONTINUATION_META]:{ token, workspace:state.live.project.activePath } } };
+    }
     if (name === "list_projects") return { structuredContent: { projects: [{ name: "Demo", selector: "demo" }], total: 1 } };
     if (name === "set_project_root") return { structuredContent: { mode: "project", active_root: "/demo", managed_worktree: args.createWorktree } };
     if (name === "self_update") return { content: [{ type: "text", text: "Update scheduled" }] };
@@ -264,6 +271,18 @@ test("replayed snapshots cannot restore old actions or replace the conversation 
   assert.match(card.text(), /Start a new conversation/);
 });
 
+test("historical setup results cannot make a retired conversation writable again", async () => {
+  const live = workspacePayload();
+  live.continuation.retired = true;
+  const historical = workspacePayload();
+  historical.continuation.retired = false;
+  const card = harness(live, live); await drain();
+  assert.match(card.text(), /continued in another ChatGPT conversation.*read-only/i);
+  card.notify("ui/notifications/tool-result", { structuredContent:historical }); await drain();
+  assert.match(card.text(), /continued in another ChatGPT conversation.*read-only/i);
+  assert.equal(card.hasButton("Copy continuation prompt"), false);
+});
+
 test("Refresh rechecks the connector before opening settings", async () => {
   const card = harness(payload("stale")); await drain();
   card.state.now += 2_000;
@@ -340,11 +359,19 @@ test("stale conversations offer an exact-workspace continuation prompt", async (
   assert.ok(card.hasButton("Copy continuation prompt"));
   const prompt = card.document.getElementById("continuation-prompt");
   assert.ok(prompt);
-  assert.ok(prompt.value.includes(JSON.stringify({ resumePath: initial.project.activePath })));
-  assert.match(prompt.value, /get_agent_brief/);
-  assert.match(prompt.value, /recall/);
-  assert.doesNotMatch(prompt.value, /"createWorktree"|"path":"\/projects\/demo"|openai\/session/);
+  assert.match(prompt.value, /Copy continuation prompt/);
+  assert.doesNotMatch(prompt.value, /resumePath|continuationToken|openai\/session/);
   assert.ok(card.hasButton("Prepare handoff"));
+  await card.click("Copy continuation prompt");
+  assert.equal(card.state.calls.at(-1).name, "setup_ui_prepare_continuation");
+  const copied = card.state.clipboard.at(-1);
+  assert.match(copied, /continue_task/);
+  assert.match(copied, /"continuationToken":"A+1"/);
+  assert.match(copied, /get_agent_brief/);
+  assert.match(copied, /recall/);
+  assert.match(copied, /agent-chat history.*saved plan.*memory.*command sessions.*task state/i);
+  assert.match(copied, /previous conversation becomes read-only/i);
+  assert.doesNotMatch(copied, /resumePath|createWorktree|openai\/session/);
 });
 
 test("unavailable workspace state cannot offer an unsafe resume prompt", async () => {
@@ -366,9 +393,11 @@ test("copy works and clipboard denial leaves a manually selectable prompt", asyn
   const field = card.document.getElementById("continuation-prompt");
   await card.click("Copy continuation prompt");
   assert.equal(card.state.clipboard[0], field.value);
+  assert.match(field.value, /"continuationToken":"A+1"/);
   assert.match(card.text(), /Copied\./);
   card.state.clipboardDenied = true;
   await card.click("Copy continuation prompt");
+  assert.match(field.value, /"continuationToken":"A+2"/);
   assert.equal(field.selectionStart, 0);
   assert.equal(field.selectionEnd, field.value.length);
   assert.match(card.text(), /copy it manually/);
@@ -406,7 +435,7 @@ test("handoff is an explicit context-saving request, not an automatic transfer",
   assert.doesNotMatch(card.text(), /Handoff saved/);
 });
 
-test("persistent scratch resumes by path, static and unselected states need no resume", async () => {
+test("selected, scratch, and static tasks use continuation tokens while unselected state needs only a summary", async () => {
   for (const kind of ["scratch", "static", "unselected", "transport"]) {
     const initial = workspacePayload();
     if (kind === "scratch") initial.project.status = "without_project";
@@ -419,11 +448,16 @@ test("persistent scratch resumes by path, static and unselected states need no r
       assert.equal(field, null);
       assert.match(card.text(), /Save or export/);
     } else if (kind === "scratch") {
-      assert.match(field.value, /"resumePath":"\/worktrees\/existing"/);
-      assert.doesNotMatch(field.value, /withoutProject/);
+      await card.click("Copy continuation prompt");
+      assert.match(field.value, /continuationToken/);
+      assert.doesNotMatch(field.value, /resumePath|withoutProject/);
+    } else if (kind === "static") {
+      await card.click("Copy continuation prompt");
+      assert.match(field.value, /continuationToken/);
+      assert.equal(card.hasButton("Prepare handoff"), true);
     } else {
-      assert.doesNotMatch(field.value, /resumePath/);
-      assert.equal(card.hasButton("Prepare handoff"), kind === "static");
+      assert.doesNotMatch(field.value, /resumePath|continuationToken/);
+      assert.equal(card.hasButton("Prepare handoff"), false);
     }
   }
 });
@@ -434,8 +468,21 @@ test("live workspace wins over a replayed old continuation path", async () => {
   const card = harness(old, live); await drain();
   card.notify("ui/notifications/tool-result", { structuredContent: old }); await drain();
   const field = card.document.getElementById("continuation-prompt");
-  assert.match(field.value, /"resumePath":"\/worktrees\/live"/);
-  assert.doesNotMatch(field.value, /\/worktrees\/existing/);
+  await card.click("Copy continuation prompt");
+  assert.equal(card.state.calls.at(-1).name, "setup_ui_prepare_continuation");
+  assert.match(field.value, /continuationToken/);
   card.state.live = payload("current", "1.2.4"); await card.tick();
   assert.equal(card.hasButton("Copy continuation prompt"), false);
+});
+
+test("a continued old conversation is visibly read-only and cannot prepare another handoff", async () => {
+  const initial = workspacePayload();
+  initial.continuation.retired = true;
+  const card = harness(initial); await drain();
+  assert.match(card.text(), /continued in another ChatGPT conversation.*read-only/i);
+  assert.equal(card.hasButton("Copy continuation prompt"), false);
+  assert.equal(card.hasButton("Prepare handoff"), false);
+  for (const button of card.root.descendants().filter(node => node.tagName === "button")) {
+    assert.equal(button.disabled, true, button.textContent);
+  }
 });

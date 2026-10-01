@@ -41,6 +41,9 @@ use crate::audit::{
 use crate::auth::{generate_internal_bearer_token, require_auth};
 use crate::bridged_resources::{BRIDGED_RESOURCE_URI_PREFIX, BridgedResourceStore};
 use crate::conversation_auth::{AUTHORIZATION_TOOL_WIRE_NAME, ConversationAuthorizationStore};
+use crate::conversation_continuations::{
+    ConversationContinuationStore, ConversationOwnership, RETIRED_MESSAGE,
+};
 use crate::diff::{DiffAvailability, DiffCheckpointManager, DiffOwner};
 use crate::diff_ui;
 use crate::exec_sessions::{ConversationExecSessionStore, SessionState};
@@ -57,6 +60,7 @@ use crate::tool::{
     Tool, ToolCallIdentity, ToolRequestContext, validate_and_wrap_tool, validate_and_wrap_tools,
 };
 use crate::tool_logging::ToolCallLogger;
+use crate::tools::continuation::{ContinueTask, PrepareContinuation};
 use crate::tools::set_project_root::{
     ProjectSelection, ProjectSelectionRequest, SetProjectRoot, select_and_render,
 };
@@ -114,6 +118,7 @@ pub struct CodexHandler {
     markdown_chat: Arc<crate::markdown_chat::MarkdownChatStore>,
     conversation_authorizations: Arc<ConversationAuthorizationStore>,
     conversation_exec_sessions: Arc<ConversationExecSessionStore>,
+    continuations: Arc<ConversationContinuationStore>,
     agent_tickets: Arc<AgentTicketStore>,
     diff_checkpoints: Arc<DiffCheckpointManager>,
     artifact_egress: Arc<ArtifactEgressStore>,
@@ -129,19 +134,20 @@ impl CodexHandler {
         &self,
         error: String,
         conversation: Option<&ConversationIdentity>,
+        task_conversation: Option<&ConversationIdentity>,
     ) -> ToolResult {
         if error == crate::agent_tickets::REJECTED
             && self.config.markdown_chat.enabled
             && self
                 .conversation_auth_error("chat_read", conversation)
                 .is_none()
-            && let Some(root) = self.selected_project_root(conversation)
+            && let Some(root) = self.selected_project_root(task_conversation)
         {
             let mut config = self.config.as_ref().clone();
             config.work_dir = root;
             let warning = match self
                 .markdown_chat
-                .chat(&config, conversation, &self.session)
+                .chat(&config, task_conversation, &self.session)
             {
                 Ok(chat) => chat.warn_ticket_rejection().await,
                 Err(error) => Err(error),
@@ -155,15 +161,15 @@ impl CodexHandler {
 
     async fn record_chat_activity(
         &self,
-        conversation: Option<&ConversationIdentity>,
+        task_conversation: Option<&ConversationIdentity>,
         at_ms: u64,
         tool_name: &str,
     ) -> Option<crate::markdown_chat::AgentActivity> {
-        let activity = self
-            .markdown_chat
-            .record_agent_call(conversation, &self.session, at_ms)?;
+        let activity =
+            self.markdown_chat
+                .record_agent_call(task_conversation, &self.session, at_ms)?;
         self.persist_chat_activity(
-            conversation,
+            task_conversation,
             activity.clone(),
             !tool_name.starts_with("chat_"),
         )
@@ -173,16 +179,16 @@ impl CodexHandler {
 
     async fn persist_chat_activity(
         &self,
-        conversation: Option<&ConversationIdentity>,
+        task_conversation: Option<&ConversationIdentity>,
         activity: crate::markdown_chat::AgentActivity,
         clear_waiting: bool,
     ) {
-        if let Some(root) = self.selected_project_root(conversation) {
+        if let Some(root) = self.selected_project_root(task_conversation) {
             let mut effective = self.config.as_ref().clone();
             effective.work_dir = root;
             if let Ok(chat) = self
                 .markdown_chat
-                .chat(&effective, conversation, &self.session)
+                .chat(&effective, task_conversation, &self.session)
             {
                 if clear_waiting {
                     chat.clear_agent_waiting();
@@ -205,12 +211,12 @@ impl CodexHandler {
 
     fn selected_project_root(
         &self,
-        conversation: Option<&ConversationIdentity>,
+        task_conversation: Option<&ConversationIdentity>,
     ) -> Option<PathBuf> {
         if !self.config.multi_project {
             return Some(self.config.work_dir.clone());
         }
-        match conversation {
+        match task_conversation {
             Some(identity) => self
                 .project_bindings
                 .selected_project_root(&self.config, identity)
@@ -220,8 +226,12 @@ impl CodexHandler {
         }
     }
 
-    fn audit_scope(&self, conversation: Option<&ConversationIdentity>) -> AuditScope {
-        let project_root = self.selected_project_root(conversation);
+    fn audit_scope(
+        &self,
+        conversation: Option<&ConversationIdentity>,
+        task_conversation: Option<&ConversationIdentity>,
+    ) -> AuditScope {
+        let project_root = self.selected_project_root(task_conversation);
         AuditScope::new(
             self.session.audit_id(),
             conversation,
@@ -326,7 +336,7 @@ fn without_widget_advertisement(
 }
 
 fn advertised_tool(tool: &dyn Tool, config: &AppConfig) -> rmcp::model::Tool {
-    let ticketed = config.experimental.agent_tickets && !app_only_tool(tool);
+    let ticketed = ticketed_model_tool(tool, config);
     let input = if ticketed {
         crate::agent_tickets::input_schema(tool.input_schema())
     } else {
@@ -408,6 +418,10 @@ fn app_only_tool(tool: &dyn Tool) -> bool {
                 .and_then(Value::as_array)
                 .is_some_and(|visibility| !visibility.contains(&json!("model")))
     })
+}
+
+fn ticketed_model_tool(tool: &dyn Tool, config: &AppConfig) -> bool {
+    config.experimental.agent_tickets && !app_only_tool(tool) && tool.name() != ContinueTask::NAME
 }
 
 fn builtin_ui_resources(ui_widgets: bool) -> Vec<rmcp::model::Resource> {
@@ -632,7 +646,42 @@ impl ServerHandler for CodexHandler {
             .unwrap_or_else(|| json!({}));
         let tool = self.tools.iter().find(|t| t.name() == name);
         let model_call = !tool.is_some_and(|tool| app_only_tool(tool.as_ref()));
-        let ticketed = self.config.experimental.agent_tickets && model_call;
+        let mut task_conversation = conversation.clone();
+        let mut conversation_retired = false;
+        let mut _model_call_guard = None;
+        if let Some(physical) = conversation.as_ref() {
+            if model_call {
+                match self.continuations.begin_model_call(physical) {
+                    Ok((task, guard)) => {
+                        task_conversation = Some(task);
+                        _model_call_guard = Some(guard);
+                    }
+                    Err(error) => {
+                        return Ok(to_call_tool_result(ToolResult::error(error)).into());
+                    }
+                }
+            } else {
+                match self.continuations.resolve(physical) {
+                    Ok(ConversationOwnership::Active { task }) => {
+                        task_conversation = Some(task);
+                    }
+                    Ok(ConversationOwnership::Retired { task })
+                        if tool.is_some_and(|tool| tool.behavior().read_only) =>
+                    {
+                        task_conversation = Some(task);
+                        conversation_retired = true;
+                    }
+                    Ok(ConversationOwnership::Retired { .. }) => {
+                        return Ok(to_call_tool_result(ToolResult::error(RETIRED_MESSAGE)).into());
+                    }
+                    Err(error) => {
+                        return Ok(to_call_tool_result(ToolResult::error(error)).into());
+                    }
+                }
+            }
+        }
+        let ticketed =
+            self.config.experimental.agent_tickets && model_call && name != ContinueTask::NAME;
         let call_id = self.next_tool_call_id.fetch_add(1, Ordering::Relaxed);
         let ticket_supplied = match args.get("codexify_ticket") {
             None => "missing",
@@ -646,7 +695,7 @@ impl ServerHandler for CodexHandler {
                     audit.ticket_reservation(
                         call_id,
                         &name,
-                        &self.audit_scope(conversation.as_ref()),
+                        &self.audit_scope(conversation.as_ref(), task_conversation.as_ref()),
                         ticket_supplied,
                         "rejected",
                         "cancelled",
@@ -664,14 +713,19 @@ impl ServerHandler for CodexHandler {
                         audit.ticket_reservation(
                             call_id,
                             &name,
-                            &self.audit_scope(conversation.as_ref()),
+                            &self.audit_scope(conversation.as_ref(), task_conversation.as_ref()),
                             ticket_supplied,
                             "rejected",
                             "malformed",
                         );
                     }
                     return Ok(to_call_tool_result(
-                        self.ticket_rejection(error, conversation.as_ref()).await,
+                        self.ticket_rejection(
+                            error,
+                            conversation.as_ref(),
+                            task_conversation.as_ref(),
+                        )
+                        .await,
                     )
                     .into());
                 }
@@ -687,15 +741,19 @@ impl ServerHandler for CodexHandler {
                         audit.ticket_reservation(
                             call_id,
                             &name,
-                            &self.audit_scope(conversation.as_ref()),
+                            &self.audit_scope(conversation.as_ref(), task_conversation.as_ref()),
                             ticket_supplied,
                             "rejected",
                             error.reason(),
                         );
                     }
                     return Ok(to_call_tool_result(
-                        self.ticket_rejection(error.to_string(), conversation.as_ref())
-                            .await,
+                        self.ticket_rejection(
+                            error.to_string(),
+                            conversation.as_ref(),
+                            task_conversation.as_ref(),
+                        )
+                        .await,
                     )
                     .into());
                 }
@@ -704,7 +762,7 @@ impl ServerHandler for CodexHandler {
                 audit.ticket_reservation(
                     call_id,
                     &name,
-                    &self.audit_scope(conversation.as_ref()),
+                    &self.audit_scope(conversation.as_ref(), task_conversation.as_ref()),
                     ticket_supplied,
                     "accepted",
                     next.acceptance(),
@@ -725,6 +783,8 @@ impl ServerHandler for CodexHandler {
             .map(str::to_owned);
         let tool_context = ToolRequestContext {
             conversation: conversation.clone(),
+            task_conversation: task_conversation.clone(),
+            conversation_retired,
             connector_schema_version,
             conversation_schema_version: conversation
                 .as_ref()
@@ -747,7 +807,7 @@ impl ServerHandler for CodexHandler {
             .conversation_auth_error("chat_read", conversation.as_ref())
             .is_none();
         let workspace_at_start = if model_call && authorized_before {
-            match conversation.as_ref() {
+            match task_conversation.as_ref() {
                 Some(identity) => {
                     self.project_bindings
                         .dispatch_workspace(&self.config, identity)
@@ -758,8 +818,8 @@ impl ServerHandler for CodexHandler {
         } else {
             Ok((None, None))
         };
-        let activity = if agent_call && authorized_before {
-            self.record_chat_activity(conversation.as_ref(), called_at_ms, &name)
+        let activity = if agent_call && authorized_before && name != ContinueTask::NAME {
+            self.record_chat_activity(task_conversation.as_ref(), called_at_ms, &name)
                 .await
         } else {
             None
@@ -785,7 +845,8 @@ impl ServerHandler for CodexHandler {
             .tool_logging
             .as_ref()
             .map(|logger| logger.begin(call_id, &call_identity, &args, input_schema.as_ref()));
-        let start_scope = needs_scope.then(|| self.audit_scope(conversation.as_ref()));
+        let start_scope = needs_scope
+            .then(|| self.audit_scope(conversation.as_ref(), task_conversation.as_ref()));
         let audit_call = self.audit.as_ref().and_then(|audit| {
             start_scope.as_ref().map(|scope| {
                 audit.begin_tool(call_id, &call_identity, &args, input_schema.as_ref(), scope)
@@ -834,7 +895,7 @@ impl ServerHandler for CodexHandler {
             // A ChatGPT conversation gets its own exec-session view (#12); generic MCP
             // clients fall back to the transport-owned session.
             let conversation_exec_session = if tool.is_some_and(|t| t.uses_exec_session_state()) {
-                conversation.as_ref().map(|identity| {
+                task_conversation.as_ref().map(|identity| {
                     self.conversation_exec_sessions
                         .session_for(identity, &self.session)
                 })
@@ -845,13 +906,106 @@ impl ServerHandler for CodexHandler {
 
             match tool {
                 None => ToolResult::error(format!("Unknown tool: {name}")),
+                Some(_) if name == PrepareContinuation::NAME => {
+                    let prepared = conversation
+                        .as_ref()
+                        .zip(task_conversation.as_ref())
+                        .ok_or_else(|| {
+                            "Conversation continuation requires stable ChatGPT conversation metadata."
+                                .to_string()
+                        })
+                        .and_then(|(physical, task)| {
+                            let root = self
+                                .selected_project_root(Some(task))
+                                .ok_or_else(|| {
+                                    "Select a workspace before preparing a continuation.".to_string()
+                                })?;
+                            let root = std::fs::canonicalize(&root).map_err(|error| {
+                                format!(
+                                    "Could not verify the current continuation workspace {}: {error}",
+                                    root.display()
+                                )
+                            })?;
+                            let token = self.continuations.issue_token(physical, task, &root)?;
+                            Ok((token, root))
+                        });
+                    match prepared {
+                        Ok((token, root)) => {
+                            PrepareContinuation::result(&token, &root.to_string_lossy())
+                        }
+                        Err(error) => ToolResult::error(error),
+                    }
+                }
+                Some(_) if name == ContinueTask::NAME => {
+                    let continued = (|| -> Result<_, String> {
+                        let physical = conversation.as_ref().ok_or(
+                            "Task continuation requires stable ChatGPT conversation metadata.",
+                        )?;
+                        let token = ContinueTask::token(&args)?;
+                        if task_conversation
+                            .as_ref()
+                            .is_some_and(|task| task.stable_key() != physical.stable_key())
+                        {
+                            return self
+                                .continuations
+                                .repeated_claim(physical, &token)?
+                                .ok_or_else(|| {
+                                    "This ChatGPT conversation is already attached to a different Codexify task."
+                                        .to_string()
+                                });
+                        }
+                        if self.config.multi_project
+                            && self
+                                .project_bindings
+                                .selected_project_root(&self.config, physical)?
+                                .is_some()
+                        {
+                            return Err(
+                                "This ChatGPT conversation already has a workspace. Continue the task in a new conversation before selecting anything."
+                                    .into(),
+                            );
+                        }
+                        self.continuations.claim(physical, &token, |source_task, saved| {
+                            let current = if self.config.multi_project {
+                                self.project_bindings
+                                    .selected_project_root(&self.config, source_task)?
+                                    .ok_or_else(|| {
+                                        "The continued task no longer has a selected workspace."
+                                            .to_string()
+                                    })?
+                            } else {
+                                self.config.work_dir.clone()
+                            };
+                            let current = std::fs::canonicalize(&current).map_err(|error| {
+                                format!(
+                                    "Could not verify the continued workspace {}: {error}",
+                                    current.display()
+                                )
+                            })?;
+                            if current != saved {
+                                return Err(
+                                    "The continued task's workspace changed after the prompt was copied. Prepare a new handoff from the current conversation."
+                                        .into(),
+                                );
+                            }
+                            Ok(())
+                        })
+                    })();
+                    match continued {
+                        Ok(claimed) => {
+                            task_conversation = Some(claimed.task);
+                            ContinueTask::result(&claimed.workspace.to_string_lossy())
+                        }
+                        Err(error) => ToolResult::error(error),
+                    }
+                }
                 Some(tool)
                     if matches!(
                         name.as_str(),
                         SetProjectRoot::NAME | crate::tools::setup_ui_action::SELECT_NAME
                     ) =>
                 {
-                    if let Some(identity) = conversation.as_ref() {
+                    if let Some(identity) = task_conversation.as_ref() {
                         select_and_render(&args, |request| async move {
                             match request {
                                 ProjectSelectionRequest::Resume(path) => {
@@ -887,7 +1041,7 @@ impl ServerHandler for CodexHandler {
                 }
                 Some(tool) if tool.requires_project_root() => {
                     let resolved = if !model_call {
-                        match conversation.as_ref() {
+                        match task_conversation.as_ref() {
                             Some(identity) => self
                                 .project_bindings
                                 .effective_config(&self.config, identity),
@@ -916,7 +1070,7 @@ impl ServerHandler for CodexHandler {
                         }
                         Err(error) => ToolResult::error(error),
                         Ok(effective_config) => {
-                            let owner = match conversation.as_ref() {
+                            let owner = match task_conversation.as_ref() {
                                 Some(identity) => DiffOwner::conversation(identity),
                                 None => DiffOwner::transport(self.session.diff_state()),
                             };
@@ -994,13 +1148,13 @@ impl ServerHandler for CodexHandler {
                 .conversation_auth_error("chat_read", conversation.as_ref())
                 .is_none()
         {
-            if !authorized_before {
-                self.record_chat_activity(conversation.as_ref(), called_at_ms, &name)
+            if name == ContinueTask::NAME || !authorized_before {
+                self.record_chat_activity(task_conversation.as_ref(), called_at_ms, &name)
                     .await;
             } else if name == SetProjectRoot::NAME
                 && let Some(activity) = activity
             {
-                self.persist_chat_activity(conversation.as_ref(), activity, true)
+                self.persist_chat_activity(task_conversation.as_ref(), activity, true)
                     .await;
             }
         }
@@ -1019,7 +1173,7 @@ impl ServerHandler for CodexHandler {
             && name == "get_agent_brief"
             && let Ok((Some(root), Some(change))) = &workspace_at_start
         {
-            if let Some(identity) = conversation.as_ref() {
+            if let Some(identity) = task_conversation.as_ref() {
                 if let Err(error) = self
                     .project_bindings
                     .acknowledge_workspace_change(&self.config, identity, &change.revision, root)
@@ -1038,9 +1192,9 @@ impl ServerHandler for CodexHandler {
 
         let used_root = if matches!(
             name.as_str(),
-            SetProjectRoot::NAME | crate::tools::setup_ui_action::SELECT_NAME
+            SetProjectRoot::NAME | crate::tools::setup_ui_action::SELECT_NAME | ContinueTask::NAME
         ) {
-            self.selected_project_root(conversation.as_ref())
+            self.selected_project_root(task_conversation.as_ref())
         } else {
             workspace_at_start
                 .as_ref()
@@ -1078,7 +1232,7 @@ impl ServerHandler for CodexHandler {
                 .ok()
                 .and_then(|(root, _)| root.clone())
         } else {
-            self.selected_project_root(conversation.as_ref())
+            self.selected_project_root(task_conversation.as_ref())
         };
         if self.config.markdown_chat.enabled
             && !tool.is_some_and(|tool| app_only_tool(tool.as_ref()))
@@ -1090,9 +1244,9 @@ impl ServerHandler for CodexHandler {
         {
             let mut effective = self.config.as_ref().clone();
             effective.work_dir = root;
-            let chat = self
-                .markdown_chat
-                .chat(&effective, conversation.as_ref(), &self.session);
+            let chat =
+                self.markdown_chat
+                    .chat(&effective, task_conversation.as_ref(), &self.session);
             let pending = match &chat {
                 Ok(chat)
                     if result.is_error
@@ -1163,9 +1317,12 @@ impl ServerHandler for CodexHandler {
         {
             if matches!(
                 name.as_str(),
-                SetProjectRoot::NAME | crate::tools::setup_ui_action::SELECT_NAME
+                SetProjectRoot::NAME
+                    | crate::tools::setup_ui_action::SELECT_NAME
+                    | ContinueTask::NAME
             ) {
-                let finish_scope = self.audit_scope(conversation.as_ref());
+                let finish_scope =
+                    self.audit_scope(conversation.as_ref(), task_conversation.as_ref());
                 audit.finish_tool(call, &call_identity, &result, duration_ms, &finish_scope);
             } else {
                 audit.finish_tool(call, &call_identity, &result, duration_ms, start_scope);
@@ -1186,7 +1343,7 @@ impl ServerHandler for CodexHandler {
         }
         if self.config.multi_project && model_call {
             let notice = if authorized_before {
-                let change = match conversation.as_ref() {
+                let change = match task_conversation.as_ref() {
                     Some(identity) => self
                         .project_bindings
                         .pending_workspace_change(&self.config, identity),
@@ -1194,7 +1351,10 @@ impl ServerHandler for CodexHandler {
                 };
                 match change {
                     Ok(Some(change)) => Some(
-                        change.notice(self.selected_project_root(conversation.as_ref()).as_deref()),
+                        change.notice(
+                            self.selected_project_root(task_conversation.as_ref())
+                                .as_deref(),
+                        ),
                     ),
                     Ok(None) => None,
                     Err(error) => Some(format!(
@@ -1214,7 +1374,7 @@ impl ServerHandler for CodexHandler {
                         audit.ticket_handoff(
                             call_id,
                             &name,
-                            &self.audit_scope(conversation.as_ref()),
+                            &self.audit_scope(conversation.as_ref(), task_conversation.as_ref()),
                             "interrupted",
                         );
                     }
@@ -1227,7 +1387,7 @@ impl ServerHandler for CodexHandler {
                         audit.ticket_handoff(
                             call_id,
                             &name,
-                            &self.audit_scope(conversation.as_ref()),
+                            &self.audit_scope(conversation.as_ref(), task_conversation.as_ref()),
                             "failed",
                         );
                     }
@@ -1247,7 +1407,7 @@ impl ServerHandler for CodexHandler {
             audit.ticket_handoff(
                 call_id,
                 &name,
-                &self.audit_scope(conversation.as_ref()),
+                &self.audit_scope(conversation.as_ref(), task_conversation.as_ref()),
                 "successor_attached",
             );
         }
@@ -1317,6 +1477,9 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
     let connector_schemas =
         Arc::new(crate::connector_schema::ConnectorSchemaStore::for_current_user(&config));
     let conversation_exec_sessions = Arc::new(ConversationExecSessionStore::new());
+    let continuations = Arc::new(
+        ConversationContinuationStore::for_current_user(&config).map_err(anyhow::Error::msg)?,
+    );
     let agent_tickets =
         Arc::new(AgentTicketStore::for_current_user(&config).map_err(anyhow::Error::msg)?);
     conversation_exec_sessions
@@ -1416,6 +1579,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
         let factory_markdown_chat = owner_chat_store.clone();
         let factory_conversation_authorizations = conversation_authorizations.clone();
         let factory_conversation_exec_sessions = conversation_exec_sessions.clone();
+        let factory_continuations = continuations.clone();
         let factory_agent_tickets = agent_tickets.clone();
         let factory_diff_checkpoints = diff_checkpoints.clone();
         let factory_artifact_egress = artifact_egress.clone();
@@ -1436,6 +1600,7 @@ pub async fn start_http_server(mut config: AppConfig) -> anyhow::Result<()> {
                     markdown_chat: factory_markdown_chat.clone(),
                     conversation_authorizations: factory_conversation_authorizations.clone(),
                     conversation_exec_sessions: factory_conversation_exec_sessions.clone(),
+                    continuations: factory_continuations.clone(),
                     agent_tickets: factory_agent_tickets.clone(),
                     diff_checkpoints: factory_diff_checkpoints.clone(),
                     artifact_egress: factory_artifact_egress.clone(),
@@ -2368,6 +2533,7 @@ mod tests {
     include!("server_markdown_chat_widget_tests.rs");
     include!("server_workspace_tests.rs");
     include!("server_agent_ticket_tests.rs");
+    include!("server_continuation_tests.rs");
 
     fn handler_with_tools(
         root: &std::path::Path,
@@ -2389,6 +2555,9 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            continuations: Arc::new(
+                ConversationContinuationStore::new(root.join("continuations.json")).unwrap(),
+            ),
             agent_tickets: Arc::new(AgentTicketStore::default()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new_at(
@@ -2453,6 +2622,9 @@ mod tests {
     async fn connector_reload_is_shared_across_transports_but_not_accounts() {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(crate::connector_schema::ConnectorSchemaStore::default());
+        let schema_version = crate::connector_schema::schema_version(
+            &crate::config::default_config(root.path().to_path_buf()),
+        );
         let metadata = |subject: &str, chat: &str| {
             json!({
                 "openai/subject":subject, "openai/organization":"workspace", "openai/session":chat
@@ -2507,10 +2679,7 @@ mod tests {
             .unwrap();
         for chat in ["old-chat", "new-chat"] {
             let after = clients[0].call_tool(probe("a", chat)).await.unwrap();
-            assert_eq!(
-                after.structured_content.unwrap()["content"],
-                env!("CARGO_PKG_VERSION")
-            );
+            assert_eq!(after.structured_content.unwrap()["content"], schema_version);
         }
         let other = clients[0].call_tool(probe("b", "old-chat")).await.unwrap();
         assert_eq!(other.structured_content.unwrap()["content"], "0.1.0");
@@ -2518,7 +2687,7 @@ mod tests {
         assert_eq!(unknown.structured_content.unwrap()["content"], "unknown");
         assert_eq!(
             store.version(&key("a")).as_deref(),
-            Some(env!("CARGO_PKG_VERSION"))
+            Some(schema_version.as_str())
         );
         assert!(store.version(&key("c")).is_none());
         for client in clients {
@@ -3030,6 +3199,9 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            continuations: Arc::new(
+                ConversationContinuationStore::new(root.path().join("continuations.json")).unwrap(),
+            ),
             agent_tickets: Arc::new(AgentTicketStore::default()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new_at(
@@ -3135,6 +3307,9 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: Arc::new(ConversationAuthorizationStore::new()),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            continuations: Arc::new(
+                ConversationContinuationStore::new(root.path().join("continuations.json")).unwrap(),
+            ),
             agent_tickets: Arc::new(AgentTicketStore::default()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new_at(
@@ -3175,6 +3350,9 @@ mod tests {
             project_bindings: Arc::new(ProjectBindingStore::new(root.path().join("bindings"))),
             conversation_authorizations: authorizations.clone(),
             conversation_exec_sessions: Arc::new(ConversationExecSessionStore::new()),
+            continuations: Arc::new(
+                ConversationContinuationStore::new(root.path().join("continuations.json")).unwrap(),
+            ),
             agent_tickets: Arc::new(AgentTicketStore::default()),
             diff_checkpoints: Arc::new(DiffCheckpointManager::new()),
             artifact_egress: Arc::new(ArtifactEgressStore::new_at(

@@ -36,11 +36,11 @@ pub(crate) fn schema(original: Option<Value>) -> Value {
     schema_with_field(
         original,
         USER_MESSAGE_FIELD,
-        "Complete new user text from this conversation's CHAT.md, never truncated by Codexify. Omitted when no user text is pending. Ordinary tool results do not acknowledge it; call chat_read.",
+        "Complete new user text from this Codexify task's CHAT.md, never truncated by Codexify. Omitted when no user text is pending. Ordinary tool results do not acknowledge it; call chat_read.",
     )
 }
 
-pub(crate) const USER_MESSAGE_DESCRIPTION: &str = "Complete new user text from this conversation's CHAT.md, never truncated by Codexify. Omitted when no user text is pending. Ordinary tool results do not acknowledge it; call chat_read.";
+pub(crate) const USER_MESSAGE_DESCRIPTION: &str = "Complete new user text from this Codexify task's CHAT.md, never truncated by Codexify. Omitted when no user text is pending. Ordinary tool results do not acknowledge it; call chat_read.";
 
 #[cfg(test)]
 pub(crate) fn schema_with_field(original: Option<Value>, field: &str, description: &str) -> Value {

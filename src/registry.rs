@@ -45,6 +45,9 @@ pub fn load_tools_for_config(config: &AppConfig) -> Vec<Box<dyn Tool>> {
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::State));
         tools.push(Box::new(tools::markdown_chat_ui::ChatUiTool::File));
     }
+    if config.ui_widgets {
+        tools.push(Box::new(tools::continuation::PrepareContinuation));
+    }
     if config.ui_widgets && (config.markdown_chat.enabled || config.experimental.agent_tickets) {
         tools.push(Box::new(tools::setup_ui_action::SetupUiAction::Update));
         if config.multi_project {
@@ -112,6 +115,7 @@ fn load_tools_with_options(
         Box::new(tools::update_plan::UpdatePlan),
         Box::new(tools::clock_curr_time::ClockCurrTime),
         Box::new(tools::clock_sleep::ClockSleep),
+        Box::new(tools::continuation::ContinueTask),
         // None of these three is a Codex tool: get_environment, get_project_doc
         // and get_agent_brief surface facts Codex sends through channels an MCP
         // server does not have.
@@ -131,7 +135,7 @@ fn load_tools_with_options(
         // Codex's skills.list / skills.read.
         Box::new(tools::skills_list::SkillsList),
         Box::new(tools::skills_read::SkillsRead),
-    ] as [Box<dyn Tool>; 30]);
+    ] as [Box<dyn Tool>; 31]);
 
     let mut seen = std::collections::HashSet::new();
     for tool in &all {

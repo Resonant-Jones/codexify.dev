@@ -228,6 +228,14 @@ impl DiffOwner {
         Self::Transport(state)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_conversation_key(&self) -> Option<&str> {
+        match self {
+            Self::Conversation { key, .. } => Some(key),
+            Self::Transport(_) => None,
+        }
+    }
+
     fn lock_key(&self, workspace_key: &str) -> String {
         match self {
             Self::Conversation { key, .. } => format!("conversation:{key}:{workspace_key}"),

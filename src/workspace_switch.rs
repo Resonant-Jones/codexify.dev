@@ -12,7 +12,7 @@ impl WorkspaceChange {
     pub fn notice(&self, active: Option<&Path>) -> String {
         match active {
             Some(path) => format!(
-                "The user switched this conversation's workspace. Previous path: {}. Current path: {}. Stop using the previous workspace assumptions. Before further project work, call get_agent_brief to load the new environment, AGENTS.md, skills and saved state, then recall as needed. Existing files and running commands in the previous workspace were not moved or deleted.",
+                "The user switched this Codexify task's workspace. Previous path: {}. Current path: {}. Stop using the previous workspace assumptions. Before further project work, call get_agent_brief to load the new environment, AGENTS.md, skills and saved state, then recall as needed. Existing files and running commands in the previous workspace were not moved or deleted.",
                 self.previous_root.display(),
                 path.display()
             ),

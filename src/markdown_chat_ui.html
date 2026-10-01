@@ -71,6 +71,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 #chat[data-awaiting="true"] #draft { border-color:var(--waiting); box-shadow:0 0 0 1px var(--waiting); }
 #chat[data-awaiting="true"] #draft:focus-visible { outline-color:var(--waiting); }
 #awaiting-hint { margin:0 4px 8px; color:var(--waiting); font-size:12px; font-weight:500; }
+#retired-hint { margin:0 4px 8px; color:var(--error); font-size:12px; font-weight:500; }
 #send { flex:0 0 38px; width:38px; height:38px; border:0; border-radius:50%; background:var(--accent); color:var(--bg); padding:9px; }
 #status { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:11px; margin:7px 4px 0; }
 #status.error { color:var(--error); }
@@ -81,7 +82,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
 <body>
 <section id="chat" aria-label="Markdown chat for this conversation">
   <header class="header">
-    <div class="heading"><h1>Agent <span id="presence" role="status"></span><span id="tool-total" hidden></span></h1><div class="subtitle">Markdown chat · This conversation only</div><div id="workspace-label" hidden></div></div>
+    <div class="heading"><h1>Agent <span id="presence" role="status"></span><span id="tool-total" hidden></span></h1><div class="subtitle">Markdown chat · This Codexify task</div><div id="workspace-label" hidden></div></div>
     <button id="collapse" class="icon-button" aria-label="Collapse chat" aria-expanded="true" title="Collapse chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 14 6-6 6 6"/></svg></button>
   </header>
   <div id="panel">
@@ -91,6 +92,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     </div>
     <div class="footer">
       <details id="retained-sends" hidden><summary id="retained-summary"></summary><div id="retained-messages"></div></details>
+      <p id="retired-hint" hidden>This task continued in another ChatGPT conversation. This chat is read-only here.</p>
       <p id="awaiting-hint" hidden>The agent is waiting for your message.</p>
       <form id="composer">
         <textarea id="draft" rows="1" aria-label="Message the agent" placeholder="Message the agent..." spellcheck="true"></textarea>
@@ -119,6 +121,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   let hostCapabilities = {};
   let statusKind = "normal";
   let available = bridge === null;
+  let externalReadOnly = false, pageRetired = false;
   let workspace, generation = 0;
   const saved = (bridge?.getState?.() || window.openai?.widgetState)?.privateContent || {};
   input.value = typeof saved.draft === "string" ? saved.draft : "";
@@ -207,12 +210,27 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     el("status").classList.toggle("error", error);
     el("refresh").hidden = !error;
   }
+  function isReadOnly() { return externalReadOnly || pageRetired; }
+  function syncInputDescription(waiting = el("chat").dataset.awaiting === "true") {
+    const ids = [];
+    if (isReadOnly()) ids.push("retired-hint");
+    if (waiting) ids.push("awaiting-hint");
+    if (ids.length) input.setAttribute("aria-describedby", ids.join(" "));
+    else input.removeAttribute("aria-describedby");
+  }
+  function syncReadOnly() {
+    const readOnly = isReadOnly();
+    el("retired-hint").hidden = !readOnly;
+    input.placeholder = readOnly ? "This chat is read-only here." : "Message the agent...";
+    syncInputDescription();
+    resizeInput();
+  }
   function resizeInput() {
     input.style.height = "auto";
     const borderHeight = input.offsetHeight - input.clientHeight;
     input.style.height = Math.min(150, input.scrollHeight + borderHeight) + "px";
-    input.disabled = !available;
-    send.disabled = !available || !chatFile || sending || !input.value.trim();
+    input.disabled = !available || isReadOnly();
+    send.disabled = !available || isReadOnly() || !chatFile || sending || !input.value.trim();
     size();
   }
   function size() {
@@ -274,12 +292,11 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       node.dataset.state = state;
       el("chat").dataset.awaiting = String(waiting);
       el("awaiting-hint").hidden = !waiting;
-      if (waiting) input.setAttribute("aria-describedby", "awaiting-hint");
-      else input.removeAttribute("aria-describedby");
+      syncInputDescription(waiting);
       resizeInput();
     }
     node.querySelector(".presence-label").textContent = label;
-    node.title = waiting ? "The agent is waiting for your message. Kept briefly between unanswered waits." : lastAgentCall === null ? "No agent tool call recorded for this conversation." : "Based on this conversation's last agent tool call, not a live connection or proof of ongoing work.";
+    node.title = waiting ? "The agent is waiting for your message. Kept briefly between unanswered waits." : lastAgentCall === null ? "No agent tool call recorded for this task." : "Based on this task's last agent tool call, not a live connection or proof of ongoing work.";
     if (!tornDown && !document.hidden && delay !== null) presenceTimer = setTimeout(updatePresence, Math.max(1, delay));
   }
   function markdown(container, text) {
@@ -421,6 +438,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   function applyPage(page, history = false) {
     const pendingCount = pendingSends.size;
     if (typeof page.chat_file !== "string" || !Number.isSafeInteger(page.delivered_through)) throw new Error("Invalid chat state from connector.");
+    if (page.retired !== undefined && typeof page.retired !== "boolean") throw new Error("Invalid chat retirement state from connector.");
     if (chatFile && chatFile !== page.chat_file) throw new Error("This widget's conversation binding changed. Open a new chat widget.");
     if (workspace && page.workspace_path && workspace !== page.workspace_path) throw new Error("Chat state belongs to a different workspace.");
     chatFile = page.chat_file;
@@ -431,9 +449,11 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       agentWaitingUntil = Number.isSafeInteger(page.agent_waiting_until_ms) && page.read_through >= waitingReplyEnd ? page.agent_waiting_until_ms : null;
       if (!Number.isSafeInteger(page.total_tool_calls) || page.total_tool_calls < 0) throw new Error("Invalid tool-call count from connector.");
       totalToolCalls = page.total_tool_calls;
+      pageRetired = page.retired === true;
       updateToolTotal();
       if (Number.isSafeInteger(page.server_time_ms)) clockOffset = page.server_time_ms - Date.now();
       updatePresence();
+      syncReadOnly();
     }
     if (!history) revision = page.revision;
     if (!page.unchanged) {
@@ -484,6 +504,12 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     resizeInput();
     if (value) { revision = null; void refresh(); }
   }
+  function setReadOnly(value) {
+    value = value === true;
+    if (tornDown || externalReadOnly === value) return;
+    externalReadOnly = value;
+    syncReadOnly();
+  }
   function setWorkspace(path, enabled = true) {
     if (tornDown) return;
     path = typeof path === "string" && path ? path : null;
@@ -493,16 +519,16 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
     refreshing = false; sending = false; loadingOlder = false;
     chatFile = null; revision = null; before = null; hasMore = false; failures = 0; snapshotEnd = 0;
     delivered = 0; readThrough = 0; lastAgentCall = null; totalToolCalls = null; clockOffset = 0;
-    agentWaitingUntil = null; waitingReplyEnd = 0;
+    agentWaitingUntil = null; waitingReplyEnd = 0; pageRetired = false;
     records.clear();
     for (const node of nodes.values()) node.remove();
     for (const node of markerNodes.values()) node.remove();
     nodes.clear(); markerNodes.clear();
     list.scrollTop = 0;
     const label = el("workspace-label"); label.hidden = !path; label.textContent = path || "";
-    el("empty").textContent = path ? "Loading this workspace's chat..." : "Select a workspace above to start this conversation's chat.";
+    el("empty").textContent = path ? "Loading this workspace's chat..." : "Select a workspace above to start this task's chat.";
     status(path ? "Loading chat..." : "Select a workspace above.", false, "normal");
-    updatePresence(); updateToolTotal(); render(); resizeInput(); save();
+    updatePresence(); updateToolTotal(); render(); syncReadOnly(); save();
     if (available) void refresh();
   }
   function schedule() {
@@ -518,12 +544,12 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
       const page = await call("chat_ui_state", { ...requestDestination(), ...(revision ? { revision } : {}) });
       if (!currentGeneration(origin)) return;
       applyPage(page); failures = 0;
-      if (statusKind !== "action") status("Enter to send. Shift + Enter for a new line.", false, "normal");
+      if (statusKind !== "action") status(isReadOnly() ? "This chat is read-only here." : "Enter to send. Shift + Enter for a new line.", false, "normal");
     } catch (error) { if (currentGeneration(origin)) { failures++; status(error.message || "Connection unavailable. Messages are retained.", true, "connection"); workspaceMismatch(error); } }
     finally { if (currentGeneration(origin)) { refreshing = false; schedule(); } }
   }
   async function deliver(message) {
-    if (!available || !chatFile || message.chat_file !== chatFile || sending || tornDown) return;
+    if (!available || isReadOnly() || !chatFile || message.chat_file !== chatFile || sending || tornDown) return;
     const origin = generation;
     sending = true; message.failed = false; message.pending = true;
     pendingSends.set(message.id, message); render(); resizeInput(); save();
@@ -553,7 +579,7 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   }
   el("composer").addEventListener("submit", event => {
     event.preventDefault();
-    if (!available || !chatFile || sending || !input.value.trim()) return;
+    if (!available || isReadOnly() || !chatFile || sending || !input.value.trim()) return;
     const message = { id:crypto.randomUUID(), role:"user", markdown:input.value, pending:true, failed:false, created_at_ms:Date.now(), tool_call_count:totalToolCalls, chat_file:chatFile, workspace_path:workspace || null };
     input.value = ""; resizeInput(); void deliver(message); input.focus(); list.scrollTop = list.scrollHeight;
   });
@@ -625,13 +651,14 @@ svg { display:block; width:100%; height:100%; fill:none; stroke:currentColor; st
   const resize = typeof ResizeObserver === "function" ? new ResizeObserver(size) : null;
   intersection?.observe(el("chat"));
   resize?.observe(el("chat"));
-  theme(window.openai); setCollapsed(); render(); resizeInput(); updatePresence(); updateToolTotal();
+  theme(window.openai); setCollapsed(); render(); syncReadOnly(); updatePresence(); updateToolTotal();
   if (!bridge) rpc("ui/initialize", { appInfo:{ name:"Codexify Markdown chat", version:"1" }, protocolVersion:"2026-01-26", appCapabilities:{} }, 5000)
     .then(result => { initialized = true; hostCapabilities = result?.hostCapabilities || {}; theme(result?.hostContext); post({ method:"ui/notifications/initialized", params:{} }); if (!chatFile) void refresh(); size(); })
     .catch(() => { if (!window.openai?.callTool) status("This host has not connected the chat widget.", true); });
   if (!bridge && window.openai?.callTool) void refresh();
   return {
     setAvailable,
+    setReadOnly,
     setWorkspace,
     setTheme:theme,
     close() { teardown(); intersection?.disconnect(); resize?.disconnect(); }

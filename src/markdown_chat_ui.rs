@@ -2,9 +2,11 @@ use rmcp::model::{MetaObject, Resource, ResourceContents};
 use serde_json::json;
 use std::sync::LazyLock;
 
-pub const CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v2/mcp-app.html";
+pub const CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v3/mcp-app.html";
+pub const PREVIOUS_CHAT_UI_URI_V2: &str = "ui://codexify/markdown-chat/v2/mcp-app.html";
 pub const PREVIOUS_CHAT_UI_URI: &str = "ui://codexify/markdown-chat/v1/mcp-app.html";
-pub const SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v5/mcp-app.html";
+pub const SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v6/mcp-app.html";
+pub const PREVIOUS_SETUP_CHAT_UI_URI_V5: &str = "ui://codexify/setup-chat/v5/mcp-app.html";
 pub const PREVIOUS_SETUP_CHAT_UI_URI_V4: &str = "ui://codexify/setup-chat/v4/mcp-app.html";
 pub const PREVIOUS_SETUP_CHAT_UI_URI_V3: &str = "ui://codexify/setup-chat/v3/mcp-app.html";
 pub const PREVIOUS_SETUP_CHAT_UI_URI: &str = "ui://codexify/setup-chat/v2/mcp-app.html";
@@ -70,7 +72,7 @@ fn resource_meta() -> MetaObject {
         "ui":{"prefersBorder":false,"csp":{"connectDomains":[],"resourceDomains":[]}},
         "openai/widgetPrefersBorder":false,
         "openai/widgetCSP":{"connect_domains":[],"resource_domains":[]},
-        "openai/widgetDescription":"Codexify setup with one conversation-specific chat panel. One grey tick means sent, two grey ticks mean returned to the agent, and two blue ticks mean acknowledged by a chat tool. Compact counters show model-visible Codexify tool calls for the conversation and between messages, preserving their position when the user sends. A red speech bubble indicates waiting for a reply; other presence indicators reflect the last agent tool call, not a live connection."
+        "openai/widgetDescription":"Codexify setup with one task-specific chat panel. One grey tick means sent, two grey ticks mean returned to the agent, and two blue ticks mean acknowledged by a chat tool. Compact counters show model-visible Codexify tool calls for the task and between messages, preserving their position when the user sends. A red speech bubble indicates waiting for a reply; other presence indicators reflect the last agent tool call, not a live connection."
     })).expect("chat resource metadata")
 }
 
@@ -78,7 +80,7 @@ pub fn resource() -> Resource {
     Resource::new(SETUP_CHAT_UI_URI, "codexify-setup-chat")
         .with_title("Codexify setup and Markdown chat")
         .with_description(
-            "This conversation's CHAT.md messages, composer, and agent-delivery receipts",
+            "This Codexify task's CHAT.md messages, composer, and agent-delivery receipts",
         )
         .with_mime_type(crate::setup_ui::SETUP_UI_MIME_TYPE)
         .with_size(SETUP_CHAT_UI_HTML.len() as u64)
@@ -88,11 +90,12 @@ pub fn resource() -> Resource {
 pub fn contents_for_uri(uri: &str) -> Option<ResourceContents> {
     let html = match uri {
         SETUP_CHAT_UI_URI
+        | PREVIOUS_SETUP_CHAT_UI_URI_V5
         | PREVIOUS_SETUP_CHAT_UI_URI_V4
         | PREVIOUS_SETUP_CHAT_UI_URI_V3
         | PREVIOUS_SETUP_CHAT_UI_URI
         | LEGACY_SETUP_CHAT_UI_URI => SETUP_CHAT_UI_HTML.as_str(),
-        CHAT_UI_URI | PREVIOUS_CHAT_UI_URI => CHAT_UI_HTML.as_str(),
+        CHAT_UI_URI | PREVIOUS_CHAT_UI_URI_V2 | PREVIOUS_CHAT_UI_URI => CHAT_UI_HTML.as_str(),
         _ => return None,
     };
     Some(
@@ -134,10 +137,12 @@ mod tests {
             Some(&json!(SETUP_CHAT_UI_URI))
         );
         assert!(contents_for_uri(CHAT_UI_URI).is_some());
+        assert!(contents_for_uri(PREVIOUS_CHAT_UI_URI_V2).is_some());
         assert!(contents_for_uri(PREVIOUS_CHAT_UI_URI).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI_V3).is_some());
         assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI_V4).is_some());
+        assert!(contents_for_uri(PREVIOUS_SETUP_CHAT_UI_URI_V5).is_some());
         assert!(contents_for_uri(LEGACY_SETUP_CHAT_UI_URI).is_some());
         assert!(contents_for_uri("ui://codexify/unrelated").is_none());
         if let Some(path) = std::env::var_os("CODEXIFY_CHAT_PREVIEW_HTML") {

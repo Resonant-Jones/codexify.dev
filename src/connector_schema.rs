@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::types::AppConfig;
 
 pub(crate) fn schema_version(config: &AppConfig) -> String {
-    let mut version = env!("CARGO_PKG_VERSION").to_string();
+    let mut version = format!("{}+continuation-v1", env!("CARGO_PKG_VERSION"));
     if config.markdown_chat.enabled {
         version.push_str("+markdown-chat-v5");
     }
@@ -182,18 +182,33 @@ mod tests {
     #[test]
     fn schema_markers_cover_all_feature_combinations_without_changing_release_version() {
         for (markdown_chat, agent_tickets, multi_project, suffix) in [
-            (false, false, false, ""),
-            (false, false, true, "+workspace-v1"),
-            (false, true, false, "+tickets-v1"),
-            (false, true, true, "+tickets-v1+workspace-v1"),
-            (true, false, false, "+markdown-chat-v5"),
-            (true, false, true, "+markdown-chat-v5+workspace-v1"),
-            (true, true, false, "+markdown-chat-v5+tickets-v1"),
+            (false, false, false, "+continuation-v1"),
+            (false, false, true, "+continuation-v1+workspace-v1"),
+            (false, true, false, "+continuation-v1+tickets-v1"),
+            (
+                false,
+                true,
+                true,
+                "+continuation-v1+tickets-v1+workspace-v1",
+            ),
+            (true, false, false, "+continuation-v1+markdown-chat-v5"),
+            (
+                true,
+                false,
+                true,
+                "+continuation-v1+markdown-chat-v5+workspace-v1",
+            ),
+            (
+                true,
+                true,
+                false,
+                "+continuation-v1+markdown-chat-v5+tickets-v1",
+            ),
             (
                 true,
                 true,
                 true,
-                "+markdown-chat-v5+tickets-v1+workspace-v1",
+                "+continuation-v1+markdown-chat-v5+tickets-v1+workspace-v1",
             ),
         ] {
             let mut config = crate::config::default_config(PathBuf::from("/tmp/project"));

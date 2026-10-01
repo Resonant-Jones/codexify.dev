@@ -6,11 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Setup-card continuation prompts now transfer one complete Codexify task to a
+  replacement ChatGPT conversation through a one-time `continue_task` token.
+  Workspace and Git state, agent-chat transcript/cursor, saved plan and memory,
+  diff checkpoints, resident command sessions, and the standalone-chat entry stay
+  attached to the same task instead of being copied. The old conversation becomes
+  read-only after the claim. Tokens are random, digest-only on disk, single-use,
+  restart-safe, and safe to retry after a lost successful response; claims fail
+  while the old owner has a model call in flight.
+
 ### Changed
 
 - The setup widget's **Refresh** dialog links to connector settings without a
   text-fragment suffix. The connector-specific destination and manual refresh
   instructions are unchanged.
+- Connector schema markers now include `+continuation-v1`. Current setup,
+  setup-chat, and Markdown-chat resources are versioned v8, v6, and v3;
+  previous resource URLs remain readable. `resumePath` remains available only as
+  a workspace-only compatibility path.
 
 ## [1.6.6] - 2026-09-27
 

@@ -306,7 +306,7 @@ pub(crate) async fn history_call(
     };
     let chat = context
         .markdown_chat
-        .chat(config, context.conversation.as_ref(), session)?;
+        .chat(config, context.task_conversation.as_ref(), session)?;
     let requested = crate::safe_path::lexical_normalize(&config.work_dir.join(input));
     let file = crate::safe_path::lexical_normalize(chat.path());
     let channel_dir = file.parent().ok_or("CHAT.md has no parent")?;
@@ -317,7 +317,7 @@ pub(crate) async fn history_call(
         return Ok(None);
     }
     if requested != file {
-        return Err("Only this conversation's CHAT.md is available through chat history reads. Use chat_read for new messages.".into());
+        return Err("Only this Codexify task's CHAT.md is available through chat history reads. Use chat_read for new messages.".into());
     }
     chat.ensure().await?;
     let mut args = args.clone();

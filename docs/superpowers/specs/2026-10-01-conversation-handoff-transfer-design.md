@@ -16,7 +16,7 @@ When the user copies the continuation prompt, the setup widget asks Codexify for
 {"continuationToken":"<opaque token>"}
 ```
 
-The user pastes that prompt into a new ChatGPT conversation using the same connector. After normal setup and authorization, the new conversation calls `set_project_root` with only `continuationToken`.
+The user pastes that prompt into a new ChatGPT conversation using the same connector. After normal setup and authorization, the new conversation calls `continue_task` with only `continuationToken` before selecting a workspace.
 
 A successful claim keeps one Codexify task and changes which ChatGPT conversation owns it. No workspace, chat, plan, or cursor is copied.
 
@@ -56,6 +56,11 @@ A continuation token is:
 - consumed by exactly one successful claim;
 - retained after a failed claim so the user can retry.
 
+After a completed claim, the task record retains the digest and workspace of that
+claim. This lets the new owner safely repeat the exact `continue_task` call after
+a lost response or service restart. A different token cannot be treated as a
+retry or attach an already-owned conversation to another task.
+
 ## Call routing
 
 Each tool call has two identities:
@@ -81,7 +86,7 @@ The claim updates the owner, records the destination alias, increments the gener
 
 If validation or persistence fails, the old owner remains active and the token remains usable. Concurrent claims have one winner.
 
-Resident shell processes are not considered in-flight tool calls. Their session map is keyed by the task identity, so the replacement can continue using known session IDs. An individual tool call already executing in the old conversation prevents the transfer until that call returns.
+Resident shell processes are not considered in-flight tool calls. Their session map is keyed by the task identity, so the replacement can continue using known session IDs while the server remains running. An individual tool call already executing in the old conversation prevents the transfer until that call returns. As before, a Codexify service restart terminates resident processes.
 
 ## Retired conversations
 
@@ -120,7 +125,7 @@ Codexify cannot copy the native ChatGPT webpage transcript because ChatGPT does 
 
 Existing conversations without continuation records behave exactly as before.
 
-The old `resumePath` continuation remains accepted for manually resuming only a workspace, but its documentation clearly distinguishes it from full task continuation. New setup-card prompts use `continuationToken`.
+The old `resumePath` continuation remains accepted for manually resuming only a workspace, but its documentation clearly distinguishes it from full task continuation. New setup-card prompts call `continue_task` with `continuationToken`.
 
 Existing chat paths, project bindings, diff refs, command sessions, and scratch workspaces do not move. The task identity initially equals the original conversation's existing stable key, so state becomes shared by resolving aliases rather than by copying or renaming files.
 

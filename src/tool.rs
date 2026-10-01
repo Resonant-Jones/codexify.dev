@@ -23,7 +23,12 @@ use crate::types::{AppConfig, ToolResult};
 
 #[derive(Clone)]
 pub struct ToolRequestContext {
+    /// Physical ChatGPT conversation that made this request.
     pub conversation: Option<ConversationIdentity>,
+    /// Stable Codexify task owner used for workspace, chat, diff, and exec state.
+    pub task_conversation: Option<ConversationIdentity>,
+    /// Whether the physical ChatGPT conversation has handed this task off.
+    pub conversation_retired: bool,
     /// Last version served on an identified connector reload; never from a widget echo.
     pub connector_schema_version: Option<String>,
     /// Conversation marker or first observed server schema, never proof of a connector reload.

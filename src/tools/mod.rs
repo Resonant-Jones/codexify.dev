@@ -4,6 +4,7 @@ pub mod apply_patch;
 pub mod check_for_updates;
 pub mod clock_curr_time;
 pub mod clock_sleep;
+pub mod continuation;
 pub mod doctor;
 pub mod exec_command;
 pub mod export_host_file;

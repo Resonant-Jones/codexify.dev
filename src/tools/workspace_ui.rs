@@ -61,7 +61,7 @@ impl Tool for WorkspaceUi {
             false,
             true,
             false,
-            "Lists local workspace information or changes this conversation's private selection bookkeeping; existing project files are never deleted or moved.",
+            "Lists local workspace information or changes this Codexify task's private selection bookkeeping; existing project files are never deleted or moved.",
         )
     }
     fn meta(&self) -> Option<MetaObject> {
@@ -126,7 +126,7 @@ impl Tool for WorkspaceUi {
                     Ok(args) => args,
                     Err(error) => return *error,
                 };
-                let switched = if let Some(identity) = &context.conversation {
+                let switched = if let Some(identity) = &context.task_conversation {
                     context
                         .project_bindings
                         .switch_to_picker(config, identity, Path::new(&expected_path))
@@ -169,7 +169,7 @@ impl Tool for WorkspaceUi {
                     Ok(args) => args,
                     Err(error) => return *error,
                 };
-                let selected = if let Some(identity) = &context.conversation {
+                let selected = if let Some(identity) = &context.task_conversation {
                     context
                         .project_bindings
                         .reuse_worktree(config, identity, &path, Path::new(&worktree_path))
