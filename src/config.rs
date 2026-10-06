@@ -2451,6 +2451,7 @@ mod tests {
             "experimental",
             "filesystem",
             "ignore",
+            "instanceName",
             "agentChat",
             "mcpServers",
             "memory",
