@@ -31,8 +31,20 @@ use crate::types::{
 use crate::util::home_dir;
 
 pub const CODEXIFY_CONFIG_ENV: &str = "CODEXIFY_CONFIG";
+pub const DEFAULT_INSTANCE_NAME: &str = "Codexify";
 const CONFIG_FILE_NAME: &str = "codexify.config.json";
 const CONFIG_HOME_DIR: &str = ".codexify";
+
+pub(crate) fn normalize_instance_name(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("instanceName must not be empty".to_string());
+    }
+    if value.chars().any(char::is_control) {
+        return Err("instanceName cannot contain control characters".to_string());
+    }
+    Ok(value.to_string())
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -598,6 +610,7 @@ struct PartialExperimental {
 struct FileConfig {
     #[serde(rename = "schemaVersion")]
     _schema_version: Option<u64>,
+    instance_name: Option<String>,
     work_dir: Option<String>,
     debug: Option<bool>,
     ui_widgets: Option<bool>,
@@ -838,6 +851,7 @@ pub fn default_config(work_dir: std::path::PathBuf) -> AppConfig {
     AppConfig {
         project_clone_dir: work_dir.clone(),
         work_dir,
+        instance_name: DEFAULT_INSTANCE_NAME.to_string(),
         debug: false,
         ui_widgets: true,
         experimental: ExperimentalConfig::default(),
@@ -1655,9 +1669,17 @@ fn load_config_with_announcements(
         );
     }
 
+    let instance_name = file
+        .instance_name
+        .as_deref()
+        .map(normalize_instance_name)
+        .transpose()?
+        .unwrap_or_else(|| DEFAULT_INSTANCE_NAME.to_string());
+
     let experimental = file.experimental.unwrap_or_default();
     let config = AppConfig {
         work_dir,
+        instance_name,
         debug: file.debug.unwrap_or(false),
         ui_widgets: file.ui_widgets.unwrap_or(true),
         experimental: ExperimentalConfig {
@@ -1920,6 +1942,32 @@ mod tests {
         let mut args = cli(root.path(), &config_path);
         args.work_dir = None;
         assert!(load_config(args).is_ok());
+    }
+
+    #[test]
+    fn instance_name_defaults_and_loads_from_config() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            default_config(root.path().to_path_buf()).instance_name,
+            DEFAULT_INSTANCE_NAME
+        );
+
+        let config_path = root.path().join("codexify.config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec(&json!({
+                "workDir": root.path(),
+                "instanceName": "  AxisNode  ",
+                "codexMcp": { "enabled": false }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut args = cli(root.path(), &config_path);
+        args.work_dir = None;
+        assert_eq!(load_config(args).unwrap().instance_name, "AxisNode");
+        assert!(normalize_instance_name(" \n").is_err());
     }
 
     #[test]
