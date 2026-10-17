@@ -2095,7 +2095,7 @@ mod tests {
             &config_path,
             serde_json::to_vec(&json!({
                 "workDir": root.path(),
-                "instanceName": "  AxisNode  ",
+                "instanceName": "  Workstation  ",
                 "codexMcp": { "enabled": false }
             }))
             .unwrap(),
@@ -2104,7 +2104,7 @@ mod tests {
 
         let mut args = cli(root.path(), &config_path);
         args.work_dir = None;
-        assert_eq!(load_config(args).unwrap().instance_name, "AxisNode");
+        assert_eq!(load_config(args).unwrap().instance_name, "Workstation");
         assert!(normalize_instance_name(" \n").is_err());
     }
 

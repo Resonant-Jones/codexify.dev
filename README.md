@@ -113,10 +113,10 @@ settings to use, saves your configuration, and starts the connection.
 
 The ChatGPT connector name is persisted as `instanceName` and advertised as the
 MCP server's human-readable title while the programmatic implementation name stays
-`codexify`. Give separate installations distinct names such as `AxisNode` and
-`VaultNode` so clients can distinguish the machines without creating different
+`codexify`. Give separate installations distinct names such as `Workstation` and
+`HomeServer` so clients can distinguish the machines without creating different
 Codexify binaries. You can change it later with
-`codexify config set instanceName AxisNode`.
+`codexify config set instanceName Workstation`.
 
 Keep Codexify running while you use it; the background service handles that for a
 standard installation.

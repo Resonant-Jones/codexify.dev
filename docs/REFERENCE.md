@@ -261,7 +261,7 @@ the runtime API key at the hidden-input prompt.
 
    ```json
    {
-     "instanceName": "AxisNode",
+     "instanceName": "Workstation",
      "workDir": "/absolute/path/to/your/project",
      "openaiTunnel": {
        "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",

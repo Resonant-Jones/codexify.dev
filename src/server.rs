@@ -3673,7 +3673,7 @@ mod tests {
     fn advertises_all_mcp_apps_resources_and_extension() {
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::config::default_config(root.path().to_path_buf());
-        config.instance_name = "AxisNode".to_string();
+        config.instance_name = "Workstation".to_string();
         let handler = CodexHandler {
             config: Arc::new(config),
             tools: Arc::new(crate::registry::load_tools()),
@@ -3703,7 +3703,7 @@ mod tests {
 
         let info = handler.get_info();
         assert_eq!(info.server_info.name, "codexify");
-        assert_eq!(info.server_info.title.as_deref(), Some("AxisNode"));
+        assert_eq!(info.server_info.title.as_deref(), Some("Workstation"));
         assert!(info.capabilities.resources.is_some());
         assert!(
             info.capabilities
